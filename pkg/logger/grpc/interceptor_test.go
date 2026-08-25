@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	kitlog "github.com/getsyntegrity/kit-logger/pkg/logger"
+	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 )
 
 func TestUnaryLoggingInterceptor_Success(t *testing.T) {

@@ -1,4 +1,4 @@
-module github.com/getsyntegrity/kit-logger
+module github.com/pablogore/kit-logger
 
 go 1.26.0
 

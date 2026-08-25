@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/getsyntegrity/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
 
 func TestSetGlobal(t *testing.T) {

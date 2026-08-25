@@ -3,14 +3,14 @@ package handler_test
 import (
 	"context"
 
-	"github.com/getsyntegrity/kit-logger/pkg/logger/utils"
+	"github.com/pablogore/kit-logger/pkg/logger/utils"
 
 	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/getsyntegrity/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
 
 func TestGlobalFieldsHandler_AppendsGlobalFields(t *testing.T) {

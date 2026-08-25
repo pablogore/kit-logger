@@ -1,7 +1,7 @@
 package httpmw
 
 import (
-	kitlog "github.com/getsyntegrity/kit-logger/pkg/logger"
+	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 
 	"net/http"
 	"time"

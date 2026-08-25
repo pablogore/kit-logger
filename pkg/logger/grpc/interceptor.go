@@ -3,7 +3,7 @@ package grpc
 import (
 	"context"
 
-	kitlog "github.com/getsyntegrity/kit-logger/pkg/logger"
+	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 
 	"time"
 

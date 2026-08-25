@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	kitlog "github.com/getsyntegrity/kit-logger/pkg/logger"
+	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 )
 
 func TestMiddleware_Success(t *testing.T) {

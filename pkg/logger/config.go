@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getsyntegrity/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
 
 var defaultLogger Logger
