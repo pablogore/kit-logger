@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/getsyntegrity/kit-core/pkg/idgen"
+	"github.com/getsyntegrity/kit-core/idgen"
 )
 
 // Middleware returns an HTTP middleware that logs each request.
