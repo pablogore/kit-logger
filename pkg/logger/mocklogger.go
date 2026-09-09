@@ -103,7 +103,8 @@ func (m *MockLogger) Flush(ctx context.Context) error {
 }
 
 // Shutdown records the call, stops accepting records and returns ShutdownErr.
-// It is idempotent: later calls return the same error without changing state.
+// It is idempotent: a later call changes nothing but the call count and returns
+// ShutdownErr again.
 func (m *MockLogger) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

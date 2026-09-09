@@ -15,9 +15,16 @@ import (
 // that is on its way out must not hang on a stuck downstream handler.
 const DefaultShutdownTimeout = 5 * time.Second
 
-// ErrLoggerShutdown is returned by Flush, Shutdown and Sync once the logger has
-// been shut down. Records submitted after that point are discarded rather than
-// delivered, and no log call panics or blocks.
+// ErrLoggerShutdown is returned by Flush and Sync once the logger's shutdown has
+// begun: there is no longer a "deliver what I just logged" to honour. Records
+// submitted from that point on are discarded rather than delivered, and no log
+// call panics or blocks.
+//
+// Shutdown does not return it for the ordinary reason. A Shutdown that follows a
+// successful one observes the shared final result — normally nil — because the
+// question it asks ("is the pipeline drained?") has been answered, not refused.
+// It surfaces ErrLoggerShutdown only if a lifecycle handler reported that error
+// itself.
 var ErrLoggerShutdown = errors.New("logger: shut down")
 
 // ManagedLogger is a Logger with an explicit, host-owned lifecycle: the host
@@ -37,13 +44,21 @@ type ManagedLogger interface {
 	// delivered downstream, or ctx expires. It does not stop the logger.
 	Flush(ctx context.Context) error
 
-	// Shutdown stops accepting records, delivers those already accepted
-	// (bounded by ctx) and releases resources. It is idempotent.
+	// Shutdown stops accepting records, delivers those already accepted and
+	// releases resources. It is idempotent.
+	//
+	// ctx bounds how long this call waits for the drain, not how long the
+	// drain may take: the shutdown is one shared operation, so a caller that
+	// gives up early gets its own ctx.Err() while the drain continues for the
+	// callers still waiting.
 	Shutdown(ctx context.Context) error
 }
 
 // Flusher is implemented by handlers that hold records the host may need to
 // deliver before the process exits — today, BufferedHandler.
+//
+// Both methods must tolerate being called more than once: discovery over a
+// hand-built chain can reach the same handler by more than one route.
 type Flusher interface {
 	Flush(ctx context.Context) error
 	Shutdown(ctx context.Context) error
@@ -76,6 +91,11 @@ const maxUnwrapDepth = 32
 // discovery never depends on a third-party handler implementing Unwrap. A
 // handler that does not is not a failure — it simply ends that branch of the
 // walk, as TestCollectFlushers_StopsAtAnOpaqueHandler pins.
+//
+// The walk does not deduplicate, so a caller's graph that reaches one handler
+// through two routes yields it twice. That is harmless because Flusher requires
+// idempotent Flush and Shutdown, and deduplicating would need the visited set
+// this function deliberately avoids.
 func collectFlushers(h slog.Handler) []Flusher {
 	var found []Flusher
 

@@ -230,14 +230,16 @@ func (l *SlogLogger) SetLevel(level slog.Level) {
 // downstream, or ctx expires — in which case it returns ctx.Err(). It does not
 // stop the logger: records logged afterwards are still delivered.
 //
-// It returns ErrLoggerShutdown if the logger has already been shut down.
+// It returns ErrLoggerShutdown once the logger's shutdown has begun — the gate
+// closes when Shutdown starts, not when it finishes — because there is no
+// longer a "deliver what I just logged" to honour.
 func (l *SlogLogger) Flush(ctx context.Context) error {
 	return l.lifecycle.flush(ctx)
 }
 
 // Shutdown stops accepting records, delivers everything already accepted and
 // releases the resources held by the pipeline. It returns ctx.Err() if ctx
-// expires before the drain completes.
+// expires while this call is still waiting.
 //
 // Shutdown is idempotent and safe to call concurrently. It is started once and
 // shared: ctx bounds how long this call waits for it, not how long the drain is
