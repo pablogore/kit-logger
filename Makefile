@@ -1,4 +1,4 @@
-.PHONY: help test build clean fmt lint vet coverage coverage-html coverage-func coverage-complete deps security check example
+.PHONY: help test build clean fmt fmt-check lint vet coverage coverage-html coverage-func coverage-complete coverage-threshold deps security check example examples test-full test-complete dev-setup ci ci-threshold ci-complete release info test-quick test-pkg bench test-race docs
 
 # Default target
 help: ## Show this help message
@@ -39,6 +39,15 @@ coverage-complete: ## Generate complete coverage report with threshold validatio
 fmt: ## Format Go code
 	go fmt ./...
 
+# Check formatting without modifying files
+fmt-check: ## Fail if any file is not gofmt-formatted
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "The following files are not gofmt-formatted:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+
 # Lint code
 lint: ## Lint Go code
 	@if command -v golangci-lint >/dev/null 2>&1; then \
@@ -63,18 +72,13 @@ deps: ## Install dependencies
 	go mod download
 	go mod tidy
 
-# Run basic example
-example: ## Run a basic logging example
-	@echo "Running basic logging example..."
-	@go run -c 'package main; import "github.com/pablogore/kit-logger/pkg/logger"; func main() { log := logger.New(logger.Config{Level: "info", Format: "json"}); log.Info("Hello from kit-logger!"); }'
+# Run the basic usage example (see pkg/logger/example_test.go)
+example: ## Run the basic logging example
+	go test -run '^Example_basicUsage$$' -v ./pkg/logger/
 
-# Run all examples
+# Run every Example function (see pkg/logger/example_test.go)
 examples: ## Run all examples
-	@echo "Running basic example..."
-	@go run -c 'package main; import "github.com/pablogore/kit-logger/pkg/logger"; func main() { log := logger.New(logger.Config{Level: "info", Format: "json"}); log.Info("Basic example"); }'
-	@echo ""
-	@echo "Running structured logging example..."
-	@go run -c 'package main; import "github.com/pablogore/kit-logger/pkg/logger"; func main() { log := logger.New(logger.Config{Level: "debug", Format: "text"}); log.Info("User login", "user_id", "123", "ip", "192.168.1.1"); }'
+	go test -run '^Example' -v ./pkg/logger/
 
 # Check for security vulnerabilities
 security: ## Check for security vulnerabilities
@@ -100,11 +104,11 @@ dev-setup: deps ## Setup development environment
 	@echo "Installed dependencies"
 
 # CI/CD pipeline
-ci: deps fmt lint vet test coverage-func ## Run CI/CD pipeline
+ci: deps fmt-check lint vet test test-race coverage-func ## Run CI/CD pipeline
 	@echo "CI/CD pipeline completed successfully"
 
 # CI/CD pipeline with threshold validation
-ci-threshold: deps fmt lint vet test coverage-threshold ## Run CI/CD pipeline with threshold validation
+ci-threshold: deps fmt-check lint vet test test-race coverage-threshold ## Run CI/CD pipeline with threshold validation
 	@echo "CI/CD pipeline with threshold validation completed successfully"
 
 # Coverage with threshold validation (85% minimum)
@@ -113,7 +117,7 @@ coverage-threshold: ## Generate coverage report with 85% threshold validation
 	@./scripts/coverage-complete-report.sh
 
 # Complete CI/CD pipeline with detailed coverage
-ci-complete: deps fmt lint vet test coverage-threshold ## Run complete CI/CD pipeline with detailed coverage analysis and threshold validation
+ci-complete: deps fmt-check lint vet test test-race coverage-threshold ## Run complete CI/CD pipeline with detailed coverage analysis and threshold validation
 	@echo "Complete CI/CD pipeline completed successfully"
 
 # Build for release

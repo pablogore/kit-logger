@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"github.com/pablogore/kit-logger/pkg/logger/utils"
+	"github.com/stretchr/testify/require"
 )
 
 // TestExtractAttrs_ReturnsAllAttributes tests that ExtractAttrs function returns all attributes from a log record.

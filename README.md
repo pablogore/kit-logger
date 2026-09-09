@@ -1,13 +1,12 @@
-# go-kit/logger
+# kit-logger
 
 An extensible structured logging framework for Go, built on top of `log/slog`, designed for observable, secure, and efficient microservices.
 
 ## Features
 
 - Full support for `log/slog`
-- Automatic redaction of sensitive fields
+- Rule-based filtering that drops a whole record when a key or key/value pair matches (no partial redaction — see [Filtering](#filtering))
 - Built-in Prometheus metrics
-- Conditional filters by key, value, and level
 - Sampling and rate limiting
 - Context-aware and extensible with hooks
 - Asynchronous buffering with safe shutdown
@@ -17,7 +16,7 @@ An extensible structured logging framework for Go, built on top of `log/slog`, d
 ## Basic Usage
 
 ```go
-import "github.com/getsyntegrity/go-kit-logger/pkg/logger"
+import "github.com/pablogore/kit-logger/pkg/logger"
 
 func main() {
     log := logger.New(logger.Config{
@@ -30,7 +29,7 @@ func main() {
     })
 
     logger.SetGlobal(log)
-    log.Info(context.Background(), "starting service")
+    log.Info("starting service")
 }
 ```
 
@@ -46,7 +45,25 @@ log := logger.New(logger.Config{
 })
 ```
 
-`Writer` composes with the rest of `Config` (`GlobalFields`, `FilterRules`, `Sampling`, `BufferSize`, `Hook`, `ContextFields`) — it only changes where the pipeline's output lands. It is ignored when `Config.Handler` is set.
+`Writer` composes with the rest of `Config` (`GlobalFields`, `FilterRules`, `Sampling`, `BufferSize`, `Hook`, `ContextFields`) — it only changes where the pipeline's output lands.
+
+**`Config.Handler` bypasses the whole pipeline, not just `Writer`.** Supplying a `slog.Handler` of your own skips `Writer`, `FilterRules`, `GlobalFields`, the component handler, `Sampling`, the Prometheus handler, `BufferSize`, and `Hook` entirely — only `Level` and `RateLimit` (via the `SlogLogger` wrapper itself) still apply. Use `Config.Handler` when you want full control over the handler chain; use the other fields when you want the built-in pipeline.
+
+## Filtering
+
+`Config.FilterRules` drops an entire record when a rule matches — there is no
+partial redaction or field masking anywhere in the pipeline. If a rule matches
+a key that also carries sensitive data, the whole record (including every
+other field on it) is discarded rather than emitted with that one field
+scrubbed. Use this for suppressing noisy or unwanted log lines, not as a
+substitute for keeping sensitive data out of log calls in the first place.
+
+## Sampling
+
+`Config.Sampling.Probability` treats `0` as **unset**, not as "drop
+everything" — an unset probability is treated as `1` and every record is
+emitted. To actually drop most records, set an explicit probability below `1`
+(e.g. `0.1` samples roughly 10%).
 
 ## Lifecycle
 
@@ -136,13 +153,11 @@ deprecated.
 
 ## Tests
 
-The framework maintains over 85% test coverage on handlers, middleware, and testing utilities.
-
-### Coverage Requirements
-
-The project enforces a **minimum 85% test coverage threshold**. Coverage reports are generated automatically and the build will fail if the threshold is not met.
-
-#### Running Coverage Reports
+The project enforces a **minimum 85% test coverage threshold**, checked by
+`./scripts/coverage-complete-report.sh`. Run `make coverage-threshold` (or
+`make ci-threshold` for the full CI pipeline) to see the current numbers —
+they aren't reproduced here since they drift with every change and a stale
+number in this file would be actively misleading.
 
 ```bash
 # Generate complete coverage report with threshold validation
@@ -155,19 +170,11 @@ make ci-threshold
 ./scripts/coverage-complete-report.sh
 ```
 
-#### Coverage Reports
-
 The coverage system generates multiple report formats:
 - **Main Report**: `coverage/coverage_report.txt` - Overall summary with threshold validation
 - **Package Report**: `coverage/coverage_packages.txt` - Detailed analysis by package
 - **File Report**: `coverage/coverage_files.txt` - Detailed analysis by file
 - **HTML Report**: `coverage/coverage_report.html` - Interactive HTML coverage report
-
-#### Current Coverage Status
-
-- **Total Coverage**: 98.2% ✅
-- **Threshold**: 85% ✅
-- **Status**: PASS with 13.2% margin
 
 ## Prometheus Metrics
 
@@ -178,8 +185,17 @@ slog_logged_total{level="INFO"} 123
 
 ## HTTP & gRPC Integration
 
-- `grpc.UnaryInterceptor(logger.GRPCInterceptor())`
-- `http.Handler = logger.HTTPMiddleware(next)`
+```go
+import (
+    kitgrpc "github.com/pablogore/kit-logger/pkg/logger/grpc"
+    "github.com/pablogore/kit-logger/pkg/logger/httpmw"
+    "google.golang.org/grpc"
+)
+
+grpcServer := grpc.NewServer(grpc.UnaryInterceptor(kitgrpc.UnaryLoggingInterceptor()))
+
+var handler http.Handler = httpmw.Middleware()(next)
+```
 
 ## Package Structure
 
@@ -188,13 +204,21 @@ pkg/logger/
 ├── config.go
 ├── interface.go
 ├── slog_logger.go
+├── rate.go
+├── context_extracto.go
 ├── grpc/
-│   └── interceptor.go
+│   └── interceptor.go       # UnaryLoggingInterceptor
 ├── httpmw/
-│   └── middleware.go
+│   └── middleware.go        # Middleware
+├── utils/
+│   └── ...                  # shared helpers
+├── kitlogtest/
+│   └── ...                  # MockLogger, TestHandler and other test doubles for consumers of this module
 └── handler/
     ├── sampling_handler.go
+    ├── filter_handler.go
     ├── global_fields_handler.go
+    ├── component_handler.go
     ├── prometheus_handler.go
     └── ...
 ```
@@ -213,7 +237,7 @@ make ci-threshold
 
 # Run specific test suites
 make test              # All tests
-make test-all          # All tests including mocks
+make test-race         # All tests with the race detector
 make coverage          # Basic coverage report
 make coverage-html     # HTML coverage report
 make coverage-func     # Function-level coverage breakdown

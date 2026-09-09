@@ -1,4 +1,4 @@
-# AGENTS.validation.md — kit-core
+# AGENTS.validation.md — kit-logger
 
 Mandatory pre-code validation. No code proposal may be made until this procedure is completed and the validation block is filled.
 
@@ -9,8 +9,8 @@ Mandatory pre-code validation. No code proposal may be made until this procedure
 Before any code change or proposal:
 
 1. **AGENTS.md** — Authority, core principles, architectural invariants, engineering discipline, AI behavior expectations.
-2. **AGENTS.rules.md** — Hard invariants: hexagonal boundaries, determinism, global state, config, UT-CORE-1, documentation, change discipline.
-3. **AGENTS.skills.md** — If present: required skills and usage constraints for the change.
+2. **AGENTS.rules.md** — Hard invariants: pipeline scope, time/randomness handling, global state, configuration, testing, change discipline.
+3. **AGENTS.skills.md** — Required skills and usage constraints for the change.
 
 Confirm each has been read. Proceed only when the change is consistent with all three.
 
@@ -18,16 +18,17 @@ Confirm each has been read. Proceed only when the change is consistent with all 
 
 ## Step 2 — Validation Questions
 
-Answer each. A "yes" where forbidden or a "no" where required must block the proposal or force a redesign.
+Answer each. A "yes" where it changes an existing contract must block the proposal or force explicit discussion — it does not mean the change is forbidden, only that it needs to be called out.
 
 | # | Question | Answer (Y/N) | Notes |
 |---|----------|--------------|-------|
-| 1 | What layer is affected? (domain / application / adapter) | | Must be explicit. Domain and application have stricter rules. |
-| 2 | Does this introduce I/O? | | If Y in domain/application: forbidden. Only in adapters. |
-| 3 | Does this introduce time or randomness? | | If Y: must be via injected interfaces (Clock, ID, etc.). No direct use. |
-| 4 | Does this introduce global state? | | If Y: forbidden. No package-level mutable vars, singletons, registries. |
-| 5 | Is config injected? | | Config must be passed in; no `os.Getenv` in domain/application. |
-| 6 | Is determinism preserved? | | Same inputs + injected deps ⇒ same outputs. No implicit time/rand. |
+| 1 | Does this change what `Config.Handler` bypasses in `New`? | | If Y: this is a breaking contract change — must be called out explicitly, not silent. |
+| 2 | Does this add or change a config field's "unset" behavior? | | Should default toward emitting (not silence) unless there's a stated reason to diverge. |
+| 3 | Does this touch `globalLogger`, `globalContextFieldExtractor`, or other package-level state? | | Must stay `atomic.Pointer`-based unless a measured hot-path regression justifies otherwise. |
+| 4 | Does this add a new handler to the built-in pipeline? | | Must implement `Unwrap`/`UnwrapAll` so `ManagedLogger` lifecycle discovery still works. |
+| 5 | Does this add a code path needing deterministic tests? | | Use the existing injection pattern (`SamplingConfig.Now`/`Rand`, `rateState.now`-style field), not a new abstraction. |
+| 6 | Does this add a test double for consumers? | | Must live in `pkg/logger/kitlogtest`, never in a production package. |
+| 7 | Does this imply or add partial redaction? | | Filtering is all-or-nothing (whole record dropped). Don't document or imply field-level redaction unless it's actually built. |
 
 ---
 
@@ -35,12 +36,13 @@ Answer each. A "yes" where forbidden or a "no" where required must block the pro
 
 Verify compliance. Every item must pass.
 
-- [ ] **Hexagonal boundaries** — Domain does not import adapters. No I/O in domain. No HTTP/gRPC/DB implementations in domain.
-- [ ] **Determinism** — No `time.Now()`, no `math/rand`/`crypto/rand` in domain/application unless via injected interface. Clock and ID injected.
-- [ ] **No global state** — No mutable package-level variables, no `sync.Once` singletons, no global registries.
-- [ ] **No `os.Getenv`** — No environment reads in domain or application. Config is explicit and injected.
-- [ ] **UT-CORE-1** — Unit tests are deterministic: no real time, no rand, no network, no real DB, no env reads. Use fakes/mocks.
-- [ ] **Documentation** — Package has `doc.go` (or package comment). Every exported symbol has GoDoc. Invariants stated where enforced.
+- [ ] **Pipeline scope** — If `Config.Handler` bypass behavior changed, it's explicitly flagged and documented (README + code comments).
+- [ ] **Time/randomness** — No new ad-hoc clock/rand abstraction; existing injection fields used or extended in the same style.
+- [ ] **Global state** — `atomic.Pointer` pattern preserved for hot-path globals; no unexplained switch to mutexes or removal of globals.
+- [ ] **Configuration defaults** — New "unset" semantics documented and consistent with fail-toward-emitting unless justified otherwise.
+- [ ] **Lifecycle** — New handlers implement `Unwrap`/`UnwrapAll`.
+- [ ] **Test doubles** — Live only in `pkg/logger/kitlogtest`.
+- [ ] **Formatting and race safety** — `gofmt -l ./pkg ./scripts` empty; `go test -race ./...` passes.
 
 ---
 
@@ -51,18 +53,18 @@ Verify compliance. Every item must pass.
 ```markdown
 ## Validation
 
-- **Governing docs read:** AGENTS.md [ ], AGENTS.rules.md [ ], AGENTS.skills.md [ ] (if present)
-- **Layer:** domain | application | adapter
-- **Introduces I/O:** Y/N — if Y, layer = adapter only
-- **Introduces time/randomness:** Y/N — if Y, via injected interface only
-- **Introduces global state:** N required
-- **Config:** injected / N/A
-- **Determinism:** preserved Y/N
-- **Rules check:** hexagonal [ ], determinism [ ], no global state [ ], no os.Getenv [ ], UT-CORE-1 [ ], documentation [ ]
+- **Governing docs read:** AGENTS.md [ ], AGENTS.rules.md [ ], AGENTS.skills.md [ ]
+- **Changes Config.Handler bypass scope:** Y/N — if Y, explicitly documented in README + code
+- **Adds/changes an "unset" config default:** Y/N — if Y, direction (emit vs. silence) and reason
+- **Touches global state:** Y/N — if Y, pattern preserved (atomic.Pointer) and reason if not
+- **New handler added:** Y/N — if Y, Unwrap/UnwrapAll implemented
+- **New deterministic test need:** Y/N — if Y, injection style used
+- **New test double added:** Y/N — if Y, located in pkg/logger/kitlogtest
+- **Rules check:** pipeline scope [ ], time/randomness [ ], global state [ ], config defaults [ ], lifecycle [ ], test doubles [ ], fmt/race [ ]
 - **Blocking issues:** none | (list)
 ```
 
-If any blocking issue is listed, do not propose code. Request clarification or redesign.
+If any blocking issue is listed, do not propose code. Request clarification or explicit sign-off on the contract change.
 
 ---
 
