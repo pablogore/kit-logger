@@ -1,15 +1,20 @@
 package logger
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
+	"os/exec"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
 
 func TestSetGlobal(t *testing.T) {
@@ -283,4 +288,137 @@ func TestNew_WithCustomOutput(t *testing.T) {
 	assert.Contains(t, string(content), "test message")
 	assert.Contains(t, string(content), "key")
 	assert.Contains(t, string(content), "value")
+}
+
+func TestConfig_Writer_DefaultsToStdout(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "logger_writer_default")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	oldStdout := os.Stdout
+	os.Stdout = tmpFile
+	defer func() { os.Stdout = oldStdout }()
+
+	logger := New(Config{Format: "json"})
+	logger.Info("default writer message")
+
+	content, err := os.ReadFile(tmpFile.Name())
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "default writer message")
+}
+
+func TestConfig_Writer_WritesIntoBuffer(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(Config{Writer: &buf, Format: "json"})
+	logger.Info("buffered message", "key", "value")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	require.NotEmpty(t, lines)
+	for _, line := range lines {
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &decoded), "line must be valid JSON: %s", line)
+	}
+	assert.Contains(t, buf.String(), "buffered message")
+}
+
+func TestConfig_Writer_ComposesWithPipeline(t *testing.T) {
+	var buf bytes.Buffer
+	hookCalled := false
+	cfg := Config{
+		Format: "json",
+		Writer: &buf,
+		GlobalFields: map[string]string{
+			"service": "test-service",
+		},
+		FilterRules: []handler.FilterRule{
+			{Key: "secret", Value: "should-be-discarded"},
+		},
+		Sampling:   SamplingConfig{Enabled: false},
+		BufferSize: 10,
+		Hook: func(ctx context.Context, r slog.Record) (context.Context, bool) {
+			hookCalled = true
+			return ctx, true
+		},
+	}
+	logger := New(cfg)
+	logger.Info("composed message", "secret", "kept")
+	require.NoError(t, logger.Sync())
+
+	out := buf.String()
+	assert.Contains(t, out, "composed message")
+	assert.Contains(t, out, `"service":"test-service"`)
+	assert.True(t, hookCalled)
+}
+
+func TestConfig_Writer_ConcurrentWritesAreNonInterleaved(t *testing.T) {
+	var buf syncBuffer
+	logger := New(Config{Writer: &buf, Format: "json"})
+
+	const n = 100
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			logger.Info("concurrent message", "i", i)
+		}(i)
+	}
+	wg.Wait()
+	require.NoError(t, logger.Sync())
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	seen := make(map[int]bool, n)
+	for _, line := range lines {
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &decoded), "line must be complete, non-interleaved JSON: %s", line)
+		if msg, _ := decoded["msg"].(string); msg == "concurrent message" {
+			seen[int(decoded["i"].(float64))] = true
+		}
+	}
+	assert.Len(t, seen, n, "all 100 concurrent log lines must be present and complete")
+}
+
+// syncBuffer wraps bytes.Buffer with a mutex so the -race detector can
+// confirm slog's own locking, not just tolerate an unguarded buffer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// TestMain intercepts the KITLOGGER_WRITER_SUBPROCESS re-exec below and exits
+// before testing.Main runs, so its own "PASS"/timing output never touches
+// stdout — leaving stdout to carry only what the logger itself writes there.
+func TestMain(m *testing.M) {
+	if os.Getenv("KITLOGGER_WRITER_SUBPROCESS") == "1" {
+		logger := New(Config{Writer: os.Stderr, Format: "json"})
+		logger.Info("subprocess stderr message")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestConfig_Writer_StderrSubprocess(t *testing.T) {
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), "KITLOGGER_WRITER_SUBPROCESS=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	require.NoError(t, cmd.Run())
+
+	assert.Empty(t, stdout.Bytes(), "stdout must be byte-empty when Config.Writer is os.Stderr")
+	assert.Contains(t, stderr.String(), "subprocess stderr message")
 }
