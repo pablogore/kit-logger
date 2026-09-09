@@ -5,21 +5,22 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
+	"github.com/pablogore/kit-logger/pkg/logger/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/pablogore/kit-logger/pkg/logger/handler"
-	"github.com/pablogore/kit-logger/pkg/logger/utils"
 )
 
 func TestMultiHandler_DelegatesToAllHandlers(t *testing.T) {
 	var called1, called2 bool
 
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		called1 = true
 		require.Equal(t, "multi test", r.Message)
 	})
 
-	handler2 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler2 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		called2 = true
 		require.Equal(t, "multi test", r.Message)
 	})
@@ -34,12 +35,12 @@ func TestMultiHandler_DelegatesToAllHandlers(t *testing.T) {
 }
 
 func TestMultiHandler_WithAttrs_PreservesHandlers(t *testing.T) {
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		attrs := utils.ExtractAttrs(r)
 		require.Equal(t, "value", attrs["key"])
 	})
 
-	handler2 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler2 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		attrs := utils.ExtractAttrs(r)
 		require.Equal(t, "value", attrs["key"])
 	})
@@ -115,13 +116,13 @@ func TestMultiHandler_Handle_WithErrors(t *testing.T) {
 	var called1, called3 bool
 
 	// Create handlers, one of which returns an error
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		called1 = true
 	})
 
 	handler2 := &errorHandler{shouldError: true} // This handler will return an error
 
-	handler3 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler3 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		called3 = true
 	})
 
@@ -138,11 +139,11 @@ func TestMultiHandler_Handle_WithErrors(t *testing.T) {
 func TestMultiHandler_Handle_NoErrors(t *testing.T) {
 	var called1, called2 bool
 
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		called1 = true
 	})
 
-	handler2 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler2 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		called2 = true
 	})
 
@@ -169,11 +170,11 @@ func TestMultiHandler_Handle_EmptyHandlers(t *testing.T) {
 func TestMultiHandler_WithGroup(t *testing.T) {
 	var captured1, captured2 slog.Record
 
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured1 = r
 	})
 
-	handler2 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler2 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured2 = r
 	})
 
@@ -196,11 +197,11 @@ func TestMultiHandler_WithGroup(t *testing.T) {
 func TestMultiHandler_WithGroup_EmptyGroup(t *testing.T) {
 	var captured1, captured2 slog.Record
 
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured1 = r
 	})
 
-	handler2 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler2 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured2 = r
 	})
 
@@ -223,11 +224,11 @@ func TestMultiHandler_WithGroup_EmptyGroup(t *testing.T) {
 func TestMultiHandler_WithGroup_WithAttrs_Integration(t *testing.T) {
 	var captured1, captured2 slog.Record
 
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured1 = r
 	})
 
-	handler2 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler2 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured2 = r
 	})
 
@@ -250,7 +251,9 @@ func TestMultiHandler_WithGroup_WithAttrs_Integration(t *testing.T) {
 	assert.Equal(t, "user login", captured1.Message)
 	assert.Equal(t, "user login", captured2.Message)
 
-	// Verify that attributes are present in both handlers
+	// Verify that attributes are present in both handlers. service/version
+	// were added before WithGroup, so they stay top-level; user_id was added
+	// after, so a correct WithGroup nests it inside "user".
 	attrs1 := utils.ExtractAttrs(captured1)
 	attrs2 := utils.ExtractAttrs(captured2)
 
@@ -258,22 +261,22 @@ func TestMultiHandler_WithGroup_WithAttrs_Integration(t *testing.T) {
 	assert.Equal(t, "auth", attrs2["service"])
 	assert.Equal(t, int64(1), attrs1["version"])
 	assert.Equal(t, int64(1), attrs2["version"])
-	assert.Equal(t, "12345", attrs1["user_id"])
-	assert.Equal(t, "12345", attrs2["user_id"])
+	assert.Equal(t, "12345", groupAttr(t, attrs1, "user", "user_id"))
+	assert.Equal(t, "12345", groupAttr(t, attrs2, "user", "user_id"))
 }
 
 func TestMultiHandler_WithGroup_MultipleHandlers(t *testing.T) {
 	var captured1, captured2, captured3 slog.Record
 
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured1 = r
 	})
 
-	handler2 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler2 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured2 = r
 	})
 
-	handler3 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler3 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured3 = r
 	})
 
@@ -291,24 +294,25 @@ func TestMultiHandler_WithGroup_MultipleHandlers(t *testing.T) {
 	assert.Equal(t, "api call", captured2.Message)
 	assert.Equal(t, "api call", captured3.Message)
 
-	// Verify that method attribute is present in all handlers
+	// Verify that method attribute is present in all handlers, nested inside
+	// the "api" group -- it was logged after WithGroup("api").
 	attrs1 := utils.ExtractAttrs(captured1)
 	attrs2 := utils.ExtractAttrs(captured2)
 	attrs3 := utils.ExtractAttrs(captured3)
 
-	assert.Equal(t, "GET", attrs1["method"])
-	assert.Equal(t, "GET", attrs2["method"])
-	assert.Equal(t, "GET", attrs3["method"])
+	assert.Equal(t, "GET", groupAttr(t, attrs1, "api", "method"))
+	assert.Equal(t, "GET", groupAttr(t, attrs2, "api", "method"))
+	assert.Equal(t, "GET", groupAttr(t, attrs3, "api", "method"))
 }
 
 func TestMultiHandler_WithGroup_ContextLogging(t *testing.T) {
 	var captured1, captured2 slog.Record
 
-	handler1 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler1 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured1 = r
 	})
 
-	handler2 := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	handler2 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured2 = r
 	})
 
@@ -326,12 +330,30 @@ func TestMultiHandler_WithGroup_ContextLogging(t *testing.T) {
 	assert.Equal(t, "session created", captured1.Message)
 	assert.Equal(t, "session created", captured2.Message)
 
-	// Verify that session_id attribute is present in both handlers
+	// Verify that session_id attribute is present in both handlers, nested
+	// inside the "session" group -- it was logged after WithGroup("session").
 	attrs1 := utils.ExtractAttrs(captured1)
 	attrs2 := utils.ExtractAttrs(captured2)
 
-	assert.Equal(t, "abc123", attrs1["session_id"])
-	assert.Equal(t, "abc123", attrs2["session_id"])
+	assert.Equal(t, "abc123", groupAttr(t, attrs1, "session", "session_id"))
+	assert.Equal(t, "abc123", groupAttr(t, attrs2, "session", "session_id"))
+}
+
+// groupAttr looks up a key inside a nested slog group captured by
+// utils.ExtractAttrs, whose map values are the raw []slog.Attr of the group.
+func groupAttr(t *testing.T, attrs map[string]interface{}, groupKey, attrKey string) any {
+	t.Helper()
+	group, ok := attrs[groupKey].([]slog.Attr)
+	if !ok {
+		t.Fatalf("%q is not a captured group", groupKey)
+	}
+	for _, a := range group {
+		if a.Key == attrKey {
+			return a.Value.Any()
+		}
+	}
+	t.Fatalf("%q not found inside group %q", attrKey, groupKey)
+	return nil
 }
 
 // multiTestLevelHandler is a simple handler that filters by level

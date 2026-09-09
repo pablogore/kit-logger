@@ -12,6 +12,7 @@ import (
 	"github.com/pablogore/kit-logger/pkg/logger/handler"
 	"github.com/pablogore/kit-logger/pkg/logger/handler/testdata"
 	"github.com/pablogore/kit-logger/pkg/logger/handler/testdata/fixtures"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,29 +28,45 @@ type component struct {
 }
 
 // componentOf extracts the "component" group from a record, if present.
+// WithGroup correctly nests attrs added after it was called -- including the
+// "component" group ComponentHandler adds inside Handle -- so this searches
+// every nesting depth rather than only the top level.
 func componentOf(t *testing.T, record slog.Record) component {
 	t.Helper()
 
 	var got component
-	record.Attrs(func(a slog.Attr) bool {
-		if a.Key != "component" {
-			return true
-		}
-		got.found = true
-		for _, attr := range a.Value.Group() {
-			switch attr.Key {
-			case "file":
-				got.file = attr.Value.String()
-			case "line":
-				got.line = int(attr.Value.Int64())
-			case "func":
-				got.fn = attr.Value.String()
-			default:
-				t.Fatalf("unexpected component field %q", attr.Key)
+	var walk func(attrs []slog.Attr) bool
+	walk = func(attrs []slog.Attr) bool {
+		for _, a := range attrs {
+			if a.Key == "component" {
+				got.found = true
+				for _, attr := range a.Value.Group() {
+					switch attr.Key {
+					case "file":
+						got.file = attr.Value.String()
+					case "line":
+						got.line = int(attr.Value.Int64())
+					case "func":
+						got.fn = attr.Value.String()
+					default:
+						t.Fatalf("unexpected component field %q", attr.Key)
+					}
+				}
+				return true
+			}
+			if a.Value.Kind() == slog.KindGroup && walk(a.Value.Group()) {
+				return true
 			}
 		}
 		return false
+	}
+
+	var top []slog.Attr
+	record.Attrs(func(a slog.Attr) bool {
+		top = append(top, a)
+		return true
 	})
+	walk(top)
 	return got
 }
 
@@ -57,7 +74,7 @@ func componentOf(t *testing.T, record slog.Record) component {
 // The accessor is safe to call after Flush of an upstream BufferedHandler.
 func captureSink() (slog.Handler, func() []slog.Record) {
 	records := make(chan slog.Record, 64)
-	sink := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	sink := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		records <- r
 	})
 	return sink, func() []slog.Record {

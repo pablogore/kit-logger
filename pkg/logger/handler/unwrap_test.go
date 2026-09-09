@@ -1,10 +1,12 @@
-package handler
+package handler_test
 
 import (
 	"context"
 	"log/slog"
 	"testing"
 
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -13,17 +15,17 @@ import (
 // decorator in this package. A decorator that forgets Unwrap silently severs a
 // lifecycle walk, so each one is checked by identity rather than by shape.
 func TestUnwrap_ReturnsTheDecoratedHandler(t *testing.T) {
-	leaf := NewTestHandler(func(context.Context, slog.Record) {})
+	leaf := kitlogtest.NewTestHandler(func(context.Context, slog.Record) {})
 	noopHook := func(ctx context.Context, _ slog.Record) (context.Context, bool) { return ctx, true }
 
 	decorators := map[string]slog.Handler{
-		"hook":         NewHookHandler(leaf, noopHook),
-		"buffered":     NewBufferedHandler(leaf, 1),
-		"prometheus":   NewPrometheusHandler(leaf),
-		"sampling":     NewSamplingHandler(leaf, SamplingConfig{}),
-		"component":    NewComponentHandler(leaf),
-		"globalFields": NewGlobalFieldsHandler(leaf, map[string]string{"k": "v"}, true),
-		"filter":       NewFilterHandler(leaf, []FilterRule{{Key: "k"}}),
+		"hook":         handler.NewHookHandler(leaf, noopHook),
+		"buffered":     handler.NewBufferedHandler(leaf, 1),
+		"prometheus":   handler.NewPrometheusHandler(leaf),
+		"sampling":     handler.NewSamplingHandler(leaf, handler.SamplingConfig{}),
+		"component":    handler.NewComponentHandler(leaf),
+		"globalFields": handler.NewGlobalFieldsHandler(leaf, map[string]string{"k": "v"}, true),
+		"filter":       handler.NewFilterHandler(leaf, []handler.FilterRule{{Key: "k"}}),
 	}
 
 	for name, decorator := range decorators {
@@ -34,16 +36,16 @@ func TestUnwrap_ReturnsTheDecoratedHandler(t *testing.T) {
 		})
 	}
 
-	if buffered, ok := decorators["buffered"].(*BufferedHandler); ok {
+	if buffered, ok := decorators["buffered"].(*handler.BufferedHandler); ok {
 		require.NoError(t, buffered.Shutdown(context.Background()))
 	}
 }
 
 func TestUnwrapAll_ReturnsEveryFanOutTarget(t *testing.T) {
-	first := NewTestHandler(func(context.Context, slog.Record) {})
-	second := NewTestHandler(func(context.Context, slog.Record) {})
+	first := kitlogtest.NewTestHandler(func(context.Context, slog.Record) {})
+	second := kitlogtest.NewTestHandler(func(context.Context, slog.Record) {})
 
-	multi := NewMultiHandler(first, second)
+	multi := handler.NewMultiHandler(first, second)
 
 	targets := multi.UnwrapAll()
 	require.Len(t, targets, 2)

@@ -291,10 +291,7 @@ func TestCollectFlushers_StopsAtAnOpaqueHandler(t *testing.T) {
 	assert.Empty(t, collectFlushers(opaque))
 }
 
-var (
-	_ ManagedLogger = (*SlogLogger)(nil)
-	_ ManagedLogger = (*MockLogger)(nil)
-)
+var _ ManagedLogger = (*SlogLogger)(nil)
 
 // TestShutdown_AccountsForEveryProducedRecord is the accounting proof: with
 // producers still logging while Shutdown runs, every record a consumer
@@ -357,28 +354,6 @@ func assertGoroutinesSettle(t *testing.T, baseline int) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-}
-
-func TestMockLogger_LifecycleIsHonest(t *testing.T) {
-	mock := NewMockLogger()
-
-	require.NoError(t, mock.Flush(context.Background()))
-	require.NoError(t, mock.Sync())
-	assert.Equal(t, 2, mock.FlushCalls(), "Sync must count as a Flush")
-
-	mock.FlushErr = errors.New("flush failed")
-	assert.ErrorIs(t, mock.Flush(context.Background()), mock.FlushErr)
-
-	mock.Info("before shutdown")
-	require.Len(t, mock.Entries, 1)
-
-	require.NoError(t, mock.Shutdown(context.Background()))
-	assert.Equal(t, 1, mock.ShutdownCalls())
-
-	mock.Info("after shutdown")
-	assert.Len(t, mock.Entries, 1, "a shut-down mock must not record new entries")
-	assert.Equal(t, []error{ErrLoggerShutdown}, mock.RejectedErrors())
-	assert.ErrorIs(t, mock.Flush(context.Background()), ErrLoggerShutdown)
 }
 
 // countingCounterHook records how often each metric name was incremented.

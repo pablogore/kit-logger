@@ -5,9 +5,10 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
 
 type contextKey string
@@ -24,7 +25,7 @@ func TestHookHandler_ExecutesHook(t *testing.T) {
 		return capturedCtx, true
 	}
 
-	h := handler.NewTestHandler(func(ctx context.Context, _ slog.Record) {
+	h := kitlogtest.NewTestHandler(func(ctx context.Context, _ slog.Record) {
 		require.Equal(t, true, ctx.Value(hookKey))
 	})
 	h = handler.NewHookHandler(h, hook)
@@ -42,7 +43,7 @@ func TestHookHandler_SkipsLog_WhenHookReturnsFalse(t *testing.T) {
 
 	handlerCalled := false
 
-	h := handler.NewTestHandler(func(_ context.Context, _ slog.Record) {
+	h := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
 		handlerCalled = true
 	})
 	h = handler.NewHookHandler(h, hook)
@@ -55,7 +56,7 @@ func TestHookHandler_SkipsLog_WhenHookReturnsFalse(t *testing.T) {
 
 func TestHookHandler_WithAttrs(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -101,7 +102,7 @@ func TestHookHandler_WithAttrs(t *testing.T) {
 
 func TestHookHandler_WithGroup(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -124,20 +125,26 @@ func TestHookHandler_WithGroup(t *testing.T) {
 	// Verify that the log was captured
 	assert.Equal(t, "test message", captured.Message)
 
+	// "id" was logged after WithGroup("user"), so a correct WithGroup nests
+	// it inside "user" instead of leaving it top-level.
 	var hasID bool
 	captured.Attrs(func(a slog.Attr) bool {
-		if a.Key == "id" {
-			hasID = true
+		if a.Key == "user" && a.Value.Kind() == slog.KindGroup {
+			for _, sub := range a.Value.Group() {
+				if sub.Key == "id" {
+					hasID = true
+				}
+			}
 		}
 		return true
 	})
 
-	assert.True(t, hasID, "id attribute should be present")
+	assert.True(t, hasID, "id attribute should be present inside the user group")
 }
 
 func TestHookHandler_WithAttrs_EmptyAttrs(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -172,7 +179,7 @@ func TestHookHandler_WithAttrs_EmptyAttrs(t *testing.T) {
 
 func TestHookHandler_WithGroup_EmptyGroup(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -207,7 +214,7 @@ func TestHookHandler_WithGroup_EmptyGroup(t *testing.T) {
 
 func TestHookHandler_WithAttrsAndGroup_Integration(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -231,34 +238,41 @@ func TestHookHandler_WithAttrsAndGroup_Integration(t *testing.T) {
 	logger := slog.New(handlerWithGroup)
 	logger.Info("payment processed", "amount", "100.00", "currency", "USD")
 
-	// Verify that the log was captured with all attributes
+	// Verify that the log was captured with all attributes. service/version
+	// were added before WithGroup, so they stay top-level; amount/currency
+	// were added after, so a correct WithGroup nests them inside "transaction".
 	assert.Equal(t, "payment processed", captured.Message)
 
 	var hasService, hasVersion, hasAmount, hasCurrency bool
 	captured.Attrs(func(a slog.Attr) bool {
-		switch a.Key {
-		case "service":
+		switch {
+		case a.Key == "service":
 			hasService = true
-		case "version":
+		case a.Key == "version":
 			hasVersion = true
-		case "amount":
-			hasAmount = true
-		case "currency":
-			hasCurrency = true
+		case a.Key == "transaction" && a.Value.Kind() == slog.KindGroup:
+			for _, sub := range a.Value.Group() {
+				switch sub.Key {
+				case "amount":
+					hasAmount = true
+				case "currency":
+					hasCurrency = true
+				}
+			}
 		}
 		return true
 	})
 
 	assert.True(t, hasService, "service attribute should be present")
 	assert.True(t, hasVersion, "version attribute should be present")
-	assert.True(t, hasAmount, "amount attribute should be present")
-	assert.True(t, hasCurrency, "currency attribute should be present")
+	assert.True(t, hasAmount, "amount attribute should be present inside the transaction group")
+	assert.True(t, hasCurrency, "currency attribute should be present inside the transaction group")
 }
 
 func TestHookHandler_WithAttrs_PreservesHook(t *testing.T) {
 	var hookCalled bool
 	var capturedCtx context.Context
-	base := handler.NewTestHandler(func(ctx context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(ctx context.Context, r slog.Record) {
 		// Verify that hook was called and context was modified
 		require.Equal(t, "hook_executed", ctx.Value(hookKey))
 	})
@@ -287,7 +301,7 @@ func TestHookHandler_WithAttrs_PreservesHook(t *testing.T) {
 func TestHookHandler_WithGroup_PreservesHook(t *testing.T) {
 	var hookCalled bool
 	var capturedCtx context.Context
-	base := handler.NewTestHandler(func(ctx context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(ctx context.Context, r slog.Record) {
 		// Verify that hook was called and context was modified
 		require.Equal(t, "hook_executed", ctx.Value(hookKey))
 	})
@@ -313,7 +327,7 @@ func TestHookHandler_WithGroup_PreservesHook(t *testing.T) {
 
 func TestHookHandler_WithAttrs_HookReturnsFalse(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -338,7 +352,7 @@ func TestHookHandler_WithAttrs_HookReturnsFalse(t *testing.T) {
 
 func TestHookHandler_WithGroup_HookReturnsFalse(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -361,7 +375,7 @@ func TestHookHandler_WithGroup_HookReturnsFalse(t *testing.T) {
 
 func TestHookHandler_WithAttrs_MultipleAttrs(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 

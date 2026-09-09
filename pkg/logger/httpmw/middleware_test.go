@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	kitlog "github.com/pablogore/kit-logger/pkg/logger"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestMiddleware_Success(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create middleware
@@ -42,7 +43,7 @@ func TestMiddleware_Success(t *testing.T) {
 
 func TestMiddleware_WithRequestID(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create middleware
@@ -72,7 +73,7 @@ func TestMiddleware_WithRequestID(t *testing.T) {
 
 func TestMiddleware_WithoutRequestID(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create middleware
@@ -101,7 +102,7 @@ func TestMiddleware_WithoutRequestID(t *testing.T) {
 
 func TestMiddleware_DifferentMethods(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create middleware
@@ -124,7 +125,7 @@ func TestMiddleware_DifferentMethods(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create new mock logger for each test
-			mockLogger := kitlog.NewMockLogger()
+			mockLogger := kitlogtest.NewMockLogger()
 			kitlog.SetGlobal(mockLogger)
 
 			// Create test handler
@@ -154,7 +155,7 @@ func TestMiddleware_DifferentMethods(t *testing.T) {
 
 func TestMiddleware_ErrorStatusCodes(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create middleware
@@ -176,7 +177,7 @@ func TestMiddleware_ErrorStatusCodes(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create new mock logger for each test
-			mockLogger := kitlog.NewMockLogger()
+			mockLogger := kitlogtest.NewMockLogger()
 			kitlog.SetGlobal(mockLogger)
 
 			// Create test handler
@@ -204,7 +205,7 @@ func TestMiddleware_ErrorStatusCodes(t *testing.T) {
 
 func TestMiddleware_ContextPreservation(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create middleware
@@ -241,7 +242,7 @@ func TestMiddleware_ContextPreservation(t *testing.T) {
 
 func TestMiddleware_Performance(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create middleware
@@ -277,7 +278,7 @@ func TestMiddleware_Performance(t *testing.T) {
 
 func TestMiddleware_ComplexPaths(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create middleware
@@ -298,7 +299,7 @@ func TestMiddleware_ComplexPaths(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create new mock logger for each test
-			mockLogger := kitlog.NewMockLogger()
+			mockLogger := kitlogtest.NewMockLogger()
 			kitlog.SetGlobal(mockLogger)
 
 			// Create test handler

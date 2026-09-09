@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pablogore/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
 )
 
 // TestPrometheusHandler is a test-specific version that doesn't use global registration
@@ -54,7 +55,7 @@ func TestPrometheusHandler_IncrementsCounter(t *testing.T) {
 	var captured slog.Record
 
 	// Handler base que captura el log
-	testHandler := handler.NewTestHandler(func(
+	testHandler := kitlogtest.NewTestHandler(func(
 		_ context.Context, r slog.Record,
 	) {
 		captured = r
@@ -83,7 +84,7 @@ func TestPrometheusHandler_IncrementsCounter(t *testing.T) {
 
 // Tests for the real PrometheusHandler
 func TestPrometheusHandler_NewPrometheusHandler(t *testing.T) {
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {})
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {})
 
 	// Test creation of PrometheusHandler
 	promHandler := handler.NewPrometheusHandler(baseHandler)
@@ -93,7 +94,7 @@ func TestPrometheusHandler_NewPrometheusHandler(t *testing.T) {
 
 func TestPrometheusHandler_Handle(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -114,7 +115,7 @@ func TestPrometheusHandler_Handle(t *testing.T) {
 
 func TestPrometheusHandler_Handle_DifferentLevels(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -155,7 +156,7 @@ func TestPrometheusHandler_Enabled(t *testing.T) {
 
 func TestPrometheusHandler_WithAttrs(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -183,7 +184,7 @@ func TestPrometheusHandler_WithAttrs(t *testing.T) {
 
 func TestPrometheusHandler_WithGroup(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -208,7 +209,7 @@ func TestPrometheusHandler_WithGroup(t *testing.T) {
 
 func TestPrometheusHandler_WithAttrs_EmptyAttrs(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -229,7 +230,7 @@ func TestPrometheusHandler_WithAttrs_EmptyAttrs(t *testing.T) {
 
 func TestPrometheusHandler_WithGroup_EmptyGroup(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -250,7 +251,7 @@ func TestPrometheusHandler_WithGroup_EmptyGroup(t *testing.T) {
 
 func TestPrometheusHandler_WithAttrsAndGroup_Integration(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -279,7 +280,7 @@ func TestPrometheusHandler_WithAttrsAndGroup_Integration(t *testing.T) {
 
 func TestPrometheusHandler_ContextLogging(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -300,7 +301,7 @@ func TestPrometheusHandler_ContextLogging(t *testing.T) {
 
 func TestPrometheusHandler_MultipleLogs(t *testing.T) {
 	var captured slog.Record
-	baseHandler := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	baseHandler := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
