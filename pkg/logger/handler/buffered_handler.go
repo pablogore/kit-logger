@@ -317,9 +317,21 @@ func (h *BufferedHandler) Dropped() uint64 { return h.core.dropped.Load() }
 // down or stopped.
 func (h *BufferedHandler) Rejected() uint64 { return h.core.rejected.Load() }
 
-// Queued is the number of items still waiting in the buffer. After Shutdown
-// returns successfully it is always zero: every accepted record and every
-// accepted flush barrier has been processed.
+// Queued is the number of items still waiting in the buffer. It exists for
+// observability and tests.
+//
+// While the handler is running the result is an instantaneous sample and
+// nothing more: the worker drains items and concurrent Handle callers add
+// them, either of which can happen before this value is even returned. It
+// therefore carries no transactional meaning and must not be used to gate
+// logic -- a zero observed here does not mean the buffer is still empty on the
+// next line. Use Flush to wait for accepted records to reach the wrapped
+// handler.
+//
+// It is a real guarantee only once the handler is quiescent: after Shutdown
+// returns successfully it is always zero, because every accepted record and
+// every accepted flush barrier has been processed and no further sends are
+// possible.
 func (h *BufferedHandler) Queued() int { return len(h.core.queue) }
 
 // HandlerErrors is the total number of errors returned by the wrapped handler.
