@@ -18,11 +18,11 @@ func TestSetContextFieldExtractor(t *testing.T) {
 	SetContextFieldExtractor(extractor)
 
 	// Verify global extractor is set
-	assert.NotNil(t, globalContextFieldExtractor)
+	assert.NotNil(t, contextFieldExtractor())
 
 	// Test that extractor is called
 	ctx := context.Background()
-	result := globalContextFieldExtractor(ctx)
+	result := contextFieldExtractor()(ctx)
 
 	assert.True(t, extractorCalled)
 	assert.Equal(t, []any{"key", "value"}, result)
@@ -33,7 +33,7 @@ func TestSetContextFieldExtractor_Nil(t *testing.T) {
 	SetContextFieldExtractor(nil)
 
 	// Verify global extractor is set to nil
-	assert.Nil(t, globalContextFieldExtractor)
+	assert.Nil(t, contextFieldExtractor())
 }
 
 func TestContextFieldExtractor_Integration(t *testing.T) {
@@ -86,7 +86,7 @@ func TestContextFieldExtractor_MultipleFields(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "user_id", "12345")
 	ctx = context.WithValue(ctx, "request_id", "req-67890")
 
-	result := globalContextFieldExtractor(ctx)
+	result := contextFieldExtractor()(ctx)
 	expected := []any{"user_id", "12345", "request_id", "req-67890"}
 
 	assert.Equal(t, expected, result)
@@ -101,7 +101,7 @@ func TestContextFieldExtractor_EmptyContext(t *testing.T) {
 	SetContextFieldExtractor(extractor)
 
 	ctx := context.Background()
-	result := globalContextFieldExtractor(ctx)
+	result := contextFieldExtractor()(ctx)
 
 	assert.Equal(t, []any{"default", "value"}, result)
 }
@@ -127,7 +127,7 @@ func TestContextFieldExtractor_ComplexTypes(t *testing.T) {
 	}
 	ctx := context.WithValue(context.Background(), "user", user)
 
-	result := globalContextFieldExtractor(ctx)
+	result := contextFieldExtractor()(ctx)
 	expected := []any{"user_name", "John Doe", "user_role", "admin"}
 
 	assert.Equal(t, expected, result)

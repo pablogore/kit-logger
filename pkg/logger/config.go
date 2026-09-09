@@ -6,12 +6,30 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
 
-var defaultLogger Logger
+var (
+	// globalLogger holds the process-wide logger. It stores a *Logger rather
+	// than a Logger because an interface value is two words -- a type and a
+	// data pointer -- and publishing two words is not atomic: a reader can
+	// observe one word of a new value next to one word of the old. The
+	// pointer is the single word that gets published, so a reader either sees
+	// the previous logger or the new one, never a mixture.
+	//
+	// atomic.Pointer rather than an RWMutex because L() is on the per-log path
+	// of every consumer: even an uncontended read lock is a shared cache line
+	// that every core has to fight over.
+	globalLogger atomic.Pointer[Logger]
+
+	// globalOnce guards the lazy default, so a burst of first callers
+	// constructs exactly one logger -- and emits exactly one startup line.
+	globalOnce sync.Once
+)
 
 // Config holds the configuration for the logger.
 type Config struct {
@@ -24,6 +42,12 @@ type Config struct {
 	Keys         []string
 	Level        string
 	Sampling     SamplingConfig
+
+	// ContextFields extracts fields from a context for WithContext. A logger
+	// configured with one reads its own immutable field and never consults the
+	// process-wide extractor, so it needs no synchronization and is unaffected
+	// by another part of the process calling SetContextFieldExtractor.
+	ContextFields ContextFieldExtractorFunc
 }
 
 // Option configures New (e.g. WithCounterHook).
@@ -62,18 +86,50 @@ type SamplingConfig struct {
 	MaxKeys int
 }
 
-// SetGlobal sets the global logger.
+// SetGlobal sets the global logger. It is safe to call concurrently with L,
+// including while requests are in flight.
+//
+// It no longer reconfigures slog.Default. Rewiring the standard library for the
+// whole process is not something a library should do as a side effect of
+// setting its own global -- and it is how a logger whose Slog() is unusable
+// becomes a landmine for unrelated code. Call SetGlobalAndSlogDefault when
+// installing the slog default is what you actually want.
+//
+// A nil logger panics: storing one would turn every later L() into a nil
+// dereference somewhere far away from the mistake.
 func SetGlobal(log Logger) {
-	defaultLogger = log
-	slog.SetDefault(defaultLogger.Slog())
+	if log == nil {
+		panic("kit-logger: SetGlobal called with a nil Logger")
+	}
+	globalLogger.Store(&log)
 }
 
-// L returns the global logger.
+// SetGlobalAndSlogDefault sets the global logger and also installs it as the
+// standard library's default through slog.SetDefault.
+//
+// The process-wide effect is in the name, which is the whole point: it is the
+// opt-in version of what SetGlobal used to do implicitly.
+func SetGlobalAndSlogDefault(log Logger) {
+	SetGlobal(log)
+	slog.SetDefault(log.Slog())
+}
+
+// L returns the global logger, constructing a default one on first use.
+//
+// Prefer owning a logger explicitly and passing it where it is needed; L exists
+// so that consumers which cannot yet do that are not forced into a racy global.
 func L() Logger {
-	if defaultLogger == nil {
-		defaultLogger = New(Config{})
+	if p := globalLogger.Load(); p != nil {
+		return *p
 	}
-	return defaultLogger
+	globalOnce.Do(func() {
+		l := New(Config{})
+		// CompareAndSwap rather than Store: a SetGlobal that landed while New
+		// was running expresses more recent intent and must not be clobbered
+		// by the lazy default.
+		globalLogger.CompareAndSwap(nil, &l)
+	})
+	return *globalLogger.Load()
 }
 
 // New creates a new Logger instance with all handlers configured.
@@ -150,11 +206,12 @@ func New(cfg Config, opts ...Option) Logger {
 		o(optVal)
 	}
 	return &SlogLogger{
-		logger:      slogLogger,
-		levelVar:    levelVar,
-		rateState:   newRateState(),
-		counterHook: optVal.counterHook,
-		lifecycle:   newLifecycleGroup(lifecycleHandlers...),
+		logger:        slogLogger,
+		levelVar:      levelVar,
+		rateState:     newRateState(),
+		counterHook:   optVal.counterHook,
+		lifecycle:     newLifecycleGroup(lifecycleHandlers...),
+		contextFields: cfg.ContextFields,
 	}
 }
 

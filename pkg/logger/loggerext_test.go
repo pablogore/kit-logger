@@ -2,7 +2,6 @@ package logger
 
 import (
 	"os"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -85,16 +84,15 @@ func TestExitWithFlush_DirectCall(t *testing.T) {
 
 func TestEnsureLoggerOnce_FirstCall(t *testing.T) {
 	// Reset global logger and sync.Once so this test sees the "first call" behavior
-	defaultLogger = nil
-	once = sync.Once{}
+	resetGlobalsForTest()
 
 	// Test first call
 	cfg := Config{Level: "debug", Format: "text"}
 	EnsureLoggerOnce(cfg)
 
 	// Verify logger was set
-	assert.NotNil(t, defaultLogger)
-	assert.IsType(t, &SlogLogger{}, defaultLogger)
+	assert.NotNil(t, peekGlobalForTest())
+	assert.IsType(t, &SlogLogger{}, peekGlobalForTest())
 }
 
 func TestEnsureLoggerOnce_SubsequentCalls(t *testing.T) {
@@ -107,14 +105,13 @@ func TestEnsureLoggerOnce_SubsequentCalls(t *testing.T) {
 	EnsureLoggerOnce(cfg)
 
 	// Verify logger is still the same (not changed)
-	assert.Equal(t, initialLogger, defaultLogger)
-	assert.NotEqual(t, &SlogLogger{}, defaultLogger)
+	assert.Same(t, initialLogger, peekGlobalForTest())
+	assert.NotEqual(t, &SlogLogger{}, peekGlobalForTest())
 }
 
 func TestEnsureLoggerOnce_MultipleCalls(t *testing.T) {
 	// Reset global logger and sync.Once so the first EnsureLoggerOnce runs
-	defaultLogger = nil
-	once = sync.Once{}
+	resetGlobalsForTest()
 
 	// Test multiple calls
 	cfg1 := Config{Level: "debug", Format: "text"}
@@ -122,13 +119,13 @@ func TestEnsureLoggerOnce_MultipleCalls(t *testing.T) {
 	cfg3 := Config{Level: "warn", Format: "text"}
 
 	EnsureLoggerOnce(cfg1)
-	firstLogger := defaultLogger
+	firstLogger := peekGlobalForTest()
 
 	EnsureLoggerOnce(cfg2)
-	secondLogger := defaultLogger
+	secondLogger := peekGlobalForTest()
 
 	EnsureLoggerOnce(cfg3)
-	thirdLogger := defaultLogger
+	thirdLogger := peekGlobalForTest()
 
 	// All should be the same logger (first one)
 	assert.Equal(t, firstLogger, secondLogger)
@@ -195,7 +192,7 @@ func TestEnsureLoggerOnce_WithDifferentConfigs(t *testing.T) {
 
 func TestEnsureLoggerOnce_Integration(t *testing.T) {
 	// Reset global logger
-	defaultLogger = nil
+	resetGlobalsForTest()
 
 	// Test integration with actual logging
 	cfg := Config{
@@ -216,7 +213,7 @@ func TestEnsureLoggerOnce_Integration(t *testing.T) {
 	logger.Info("test message", "key", "value")
 
 	// Test that the logger is the same as the global one
-	assert.Equal(t, defaultLogger, logger)
+	assert.Same(t, peekGlobalForTest(), logger)
 }
 
 func TestEnsureLoggerOnce_WithNilConfig(t *testing.T) {
@@ -251,7 +248,7 @@ func TestEnsureLoggerOnce_ThreadSafety(t *testing.T) {
 	}
 
 	// Verify logger was set correctly
-	assert.NotNil(t, defaultLogger)
+	assert.NotNil(t, peekGlobalForTest())
 }
 
 func TestLoggerExtension_EdgeCases(t *testing.T) {
@@ -276,6 +273,6 @@ func TestLoggerExtension_WithCustomLogger(t *testing.T) {
 	EnsureLoggerOnce(cfg)
 
 	// Should still be the custom logger
-	assert.Equal(t, customLogger, defaultLogger)
-	assert.NotEqual(t, &SlogLogger{}, defaultLogger)
+	assert.Same(t, customLogger, peekGlobalForTest())
+	assert.NotEqual(t, &SlogLogger{}, peekGlobalForTest())
 }

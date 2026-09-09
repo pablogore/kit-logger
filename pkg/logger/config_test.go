@@ -17,15 +17,16 @@ func TestSetGlobal(t *testing.T) {
 	mockLogger := NewMockLogger()
 	SetGlobal(mockLogger)
 
-	// Verify global logger is set
-	assert.Equal(t, mockLogger, defaultLogger)
+	// Verify global logger is set -- by identity, so a copy or a torn value
+	// would not pass.
+	assert.Same(t, mockLogger, L())
 }
 
 func TestL_WithNilLogger(t *testing.T) {
 	// Reset global logger
-	defaultLogger = nil
+	resetGlobalsForTest()
 
-	// Test L() when defaultLogger is nil
+	// Test L() when no global logger is installed
 	logger := L()
 	assert.NotNil(t, logger)
 	assert.IsType(t, &SlogLogger{}, logger)

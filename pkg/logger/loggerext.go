@@ -29,11 +29,17 @@ func ExitWithFlush(code int) {
 	exitFunc(code)
 }
 
-var once sync.Once
+// ensureLoggerOnce guards EnsureLoggerOnce. It is named rather than left as a
+// bare "once" because the package now has two: this one and globalOnce, which
+// guards L's lazy default.
+var ensureLoggerOnce sync.Once
 
-// EnsureLoggerOnce initializes the global logger only once with the provided configuration.
+// EnsureLoggerOnce initializes the global logger only once with the provided
+// configuration. Later calls are no-ops, whatever cfg they are given.
+//
+// It does not install the logger as slog.Default; see SetGlobal.
 func EnsureLoggerOnce(cfg Config) {
-	once.Do(func() {
+	ensureLoggerOnce.Do(func() {
 		SetGlobal(New(cfg))
 	})
 }
