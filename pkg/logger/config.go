@@ -83,9 +83,19 @@ func New(cfg Config, opts ...Option) Logger {
 	levelVar := new(slog.LevelVar)
 	levelVar.Set(level)
 
+	// lifecycleHandlers is captured while the pipeline is being assembled
+	// rather than rediscovered at Flush/Shutdown time. Walking the chain at
+	// call time is wrong twice over: any handler that does not implement
+	// Unwrap severs the walk, and after With the outermost handler is a
+	// derived one, not the root that owns the buffer.
+	var lifecycleHandlers []Flusher
+
 	var h slog.Handler
 	if cfg.Handler != nil {
 		h = cfg.Handler
+		// The chain came from the caller, so this is the one case where the
+		// lifecycle-bearing handlers have to be discovered.
+		lifecycleHandlers = collectFlushers(h)
 	} else {
 		if cfg.Format == "json" {
 			h = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: levelVar})
@@ -121,7 +131,9 @@ func New(cfg Config, opts ...Option) Logger {
 		h = handler.NewPrometheusHandler(h)
 
 		if cfg.BufferSize > 0 {
-			h = handler.NewBufferedHandler(h, cfg.BufferSize)
+			buffered := handler.NewBufferedHandler(h, cfg.BufferSize)
+			lifecycleHandlers = append(lifecycleHandlers, buffered)
+			h = buffered
 		}
 
 		if cfg.Hook != nil {
@@ -142,6 +154,7 @@ func New(cfg Config, opts ...Option) Logger {
 		levelVar:    levelVar,
 		rateState:   newRateState(),
 		counterHook: optVal.counterHook,
+		lifecycle:   newLifecycleGroup(lifecycleHandlers...),
 	}
 }
 

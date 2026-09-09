@@ -15,9 +15,24 @@ type LogEntry struct {
 }
 
 // MockLogger is a test logger that stores logs in memory.
+//
+// It implements ManagedLogger honestly: it records that Flush and Shutdown were
+// called, lets a test inject the error each should return, and rejects records
+// logged after Shutdown instead of quietly accepting them. A mock that always
+// succeeds proves nothing about the code under test.
 type MockLogger struct {
 	mu      sync.Mutex
 	Entries []LogEntry
+
+	// FlushErr and ShutdownErr are returned by Flush and Shutdown. Set them to
+	// exercise a caller's error path.
+	FlushErr    error
+	ShutdownErr error
+
+	flushCalls    int
+	shutdownCalls int
+	shutdown      bool
+	rejected      []error
 }
 
 func NewMockLogger() *MockLogger {
@@ -55,6 +70,12 @@ func (m *MockLogger) Log(ctx context.Context, level slog.Level, msg string, args
 func (m *MockLogger) log(ctx context.Context, level slog.Level, msg string, args ...any) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.shutdown {
+		// Mirror SlogLogger: a shut-down logger records nothing and reports
+		// the rejection instead of pretending the write succeeded.
+		m.rejected = append(m.rejected, ErrLoggerShutdown)
+		return
+	}
 	m.Entries = append(m.Entries, LogEntry{
 		Level:   level,
 		Message: msg,
@@ -69,7 +90,53 @@ func (m *MockLogger) WithContext(_ context.Context) Logger { return m }
 
 func (m *MockLogger) SetLevel(_ slog.Level) {}
 
-func (m *MockLogger) Sync() error { return nil }
+// Flush records the call and returns FlushErr, or ErrLoggerShutdown once
+// Shutdown has been called.
+func (m *MockLogger) Flush(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flushCalls++
+	if m.shutdown {
+		return ErrLoggerShutdown
+	}
+	return m.FlushErr
+}
+
+// Shutdown records the call, stops accepting records and returns ShutdownErr.
+// It is idempotent: later calls return the same error without changing state.
+func (m *MockLogger) Shutdown(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shutdownCalls++
+	m.shutdown = true
+	return m.ShutdownErr
+}
+
+// Sync is Flush with a background context.
+//
+// Deprecated: use Flush or Shutdown, which take a context.
+func (m *MockLogger) Sync() error { return m.Flush(context.Background()) }
+
+// FlushCalls is the number of times Flush (including Sync) was called.
+func (m *MockLogger) FlushCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.flushCalls
+}
+
+// ShutdownCalls is the number of times Shutdown was called.
+func (m *MockLogger) ShutdownCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.shutdownCalls
+}
+
+// RejectedErrors is one error per record submitted after Shutdown.
+func (m *MockLogger) RejectedErrors() []error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]error(nil), m.rejected...)
+}
 
 func (m *MockLogger) HasMessage(expected string) bool {
 	m.mu.Lock()

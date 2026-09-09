@@ -20,6 +20,12 @@ type SlogLogger struct {
 	levelVar    *slog.LevelVar
 	rateState   *rateState
 	counterHook CounterHook
+
+	// lifecycle is captured at construction and shared by every derived
+	// logger, so Flush and Shutdown reach the buffer no matter how many
+	// decorators wrap it and no matter how the logger was derived. It is nil
+	// for a SlogLogger built by hand, which then has nothing to flush.
+	lifecycle *lifecycleGroup
 }
 
 // callerPCSkip is the runtime.Callers skip depth that lands on the caller of an
@@ -160,6 +166,13 @@ func orBackground(ctx context.Context) context.Context {
 // It is only reached once the level is known to be enabled, so a suppressed
 // level consumes no rate-limit token and fires no counter.
 func (l *SlogLogger) logRateAware(args []any, emit func([]any)) {
+	// A shut-down logger accepts nothing: no record, no rate-limit token and
+	// no counter increment. Dropping here rather than inside emit is what
+	// keeps a post-Shutdown call free of side effects.
+	if l.lifecycle.isStopped() {
+		l.lifecycle.rejectRecord()
+		return
+	}
 	filtered, rateLimit, counter := extractLogOptions(args)
 	allow, suppressed, addSuppressedField := l.rateState.shouldLog(rateLimit)
 	if !allow {
@@ -194,6 +207,7 @@ func (l *SlogLogger) With(args ...any) Logger {
 		levelVar:    l.levelVar,
 		rateState:   l.rateState,
 		counterHook: l.counterHook,
+		lifecycle:   l.lifecycle,
 	}
 }
 
@@ -210,11 +224,43 @@ func (l *SlogLogger) SetLevel(level slog.Level) {
 	}
 }
 
+// Flush returns once every record accepted before the call has been delivered
+// downstream, or ctx expires — in which case it returns ctx.Err(). It does not
+// stop the logger: records logged afterwards are still delivered.
+//
+// It returns ErrLoggerShutdown if the logger has already been shut down.
+func (l *SlogLogger) Flush(ctx context.Context) error {
+	return l.lifecycle.flush(ctx)
+}
+
+// Shutdown stops accepting records, delivers everything already accepted and
+// releases the resources held by the pipeline. It returns ctx.Err() if ctx
+// expires before the drain completes.
+//
+// Shutdown is idempotent and safe to call concurrently: every caller sees the
+// same result. Log calls after Shutdown are discarded; they never panic and
+// never block.
+func (l *SlogLogger) Shutdown(ctx context.Context) error {
+	return l.lifecycle.shutdown(ctx)
+}
+
+// Rejected is the number of records discarded because the logger had already
+// been shut down when they were submitted.
+//
+// Records rejected or dropped by the buffer itself are counted by the buffered
+// handler, not here. Together the three counters account for every record a
+// consumer submitted.
+func (l *SlogLogger) Rejected() uint64 {
+	return l.lifecycle.rejectedCount()
+}
+
+// Sync is Flush with a background context.
+//
+// Deprecated: use Flush or Shutdown, which take a context and therefore a
+// deadline. Sync remains on the Logger interface for source compatibility, and
+// unlike the version it replaces it actually flushes.
 func (l *SlogLogger) Sync() error {
-	if flusher, ok := l.logger.Handler().(interface{ Flush() }); ok {
-		flusher.Flush()
-	}
-	return nil
+	return l.Flush(context.Background())
 }
 
 func (l *SlogLogger) Slog() *slog.Logger {
