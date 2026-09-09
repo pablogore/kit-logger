@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pablogore/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
 )
 
 // benchPC is a real program counter used as slog.Record.PC in the benchmarks.
@@ -26,7 +27,7 @@ var benchPC = func() uintptr {
 // configuration where live-stack attribution used to break.
 func BenchmarkComponentHandler(b *testing.B) {
 	b.Run("Direct", func(b *testing.B) {
-		sink := handler.NewTestHandler(func(context.Context, slog.Record) {})
+		sink := kitlogtest.NewTestHandler(func(context.Context, slog.Record) {})
 		h := handler.NewComponentHandler(sink)
 		ctx := context.Background()
 
@@ -39,7 +40,7 @@ func BenchmarkComponentHandler(b *testing.B) {
 	})
 
 	b.Run("Buffered", func(b *testing.B) {
-		sink := handler.NewTestHandler(func(context.Context, slog.Record) {})
+		sink := kitlogtest.NewTestHandler(func(context.Context, slog.Record) {})
 		buffered := handler.NewBufferedHandler(handler.NewComponentHandler(sink), 4096)
 		ctx := context.Background()
 

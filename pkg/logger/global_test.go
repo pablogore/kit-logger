@@ -11,9 +11,46 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
+
+// attrCapturingHandler is a minimal leaf handler that hands the attrs of every
+// record it receives to a callback. Tests in this file cannot use
+// kitlogtest.TestHandler: this is an internal (package logger, not
+// logger_test) test file, and kitlogtest imports package logger -- importing
+// it back here would be a compile-time import cycle.
+type attrCapturingHandler struct {
+	callback func(context.Context, slog.Record)
+	attrs    []slog.Attr
+}
+
+func newAttrCapturingHandler(callback func(context.Context, slog.Record)) *attrCapturingHandler {
+	return &attrCapturingHandler{callback: callback}
+}
+
+func (h *attrCapturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *attrCapturingHandler) Handle(ctx context.Context, r slog.Record) error {
+	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	out.AddAttrs(h.attrs...)
+	r.Attrs(func(a slog.Attr) bool {
+		out.AddAttrs(a)
+		return true
+	})
+	h.callback(ctx, out)
+	return nil
+}
+
+func (h *attrCapturingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if len(attrs) == 0 {
+		return h
+	}
+	merged := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
+	merged = append(merged, h.attrs...)
+	merged = append(merged, attrs...)
+	return &attrCapturingHandler{callback: h.callback, attrs: merged}
+}
+
+func (h *attrCapturingHandler) WithGroup(_ string) slog.Handler { return h }
 
 // discardHandler is a leaf handler that costs nothing. The concurrency tests
 // below hammer the *globals*, so the pipeline underneath must not dominate the
@@ -254,7 +291,7 @@ func TestWithContext_PerInstanceExtractorIgnoresTheGlobal(t *testing.T) {
 	withFreshGlobals(t)
 
 	var seen []slog.Attr
-	base := handler.NewTestHandler(func(_ context.Context, record slog.Record) {
+	base := newAttrCapturingHandler(func(_ context.Context, record slog.Record) {
 		record.Attrs(func(a slog.Attr) bool {
 			seen = append(seen, a)
 			return true
@@ -284,7 +321,7 @@ func TestWithContext_FallsBackToTheGlobalExtractor(t *testing.T) {
 	withFreshGlobals(t)
 
 	var seen []slog.Attr
-	base := handler.NewTestHandler(func(_ context.Context, record slog.Record) {
+	base := newAttrCapturingHandler(func(_ context.Context, record slog.Record) {
 		record.Attrs(func(a slog.Attr) bool {
 			seen = append(seen, a)
 			return true

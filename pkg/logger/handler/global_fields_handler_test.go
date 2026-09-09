@@ -3,20 +3,45 @@ package handler_test
 import (
 	"context"
 
-	"github.com/pablogore/kit-logger/pkg/logger/utils"
-
 	"log/slog"
 	"testing"
 
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
+
+// flattenAttrs collects every leaf attribute of a record into one map,
+// descending into nested groups. WithGroup now correctly nests attrs added
+// after it was called -- including the ones this package's decorators add
+// inside Handle -- so a flat lookup by key, regardless of depth, is what
+// these tests actually mean to assert.
+func flattenAttrs(r slog.Record) map[string]any {
+	out := map[string]any{}
+	var walk func([]slog.Attr)
+	walk = func(attrs []slog.Attr) {
+		for _, a := range attrs {
+			if a.Value.Kind() == slog.KindGroup {
+				walk(a.Value.Group())
+				continue
+			}
+			out[a.Key] = a.Value.Any()
+		}
+	}
+	var top []slog.Attr
+	r.Attrs(func(a slog.Attr) bool {
+		top = append(top, a)
+		return true
+	})
+	walk(top)
+	return out
+}
 
 func TestGlobalFieldsHandler_AppendsGlobalFields(t *testing.T) {
 	var captured slog.Record
 
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -27,7 +52,7 @@ func TestGlobalFieldsHandler_AppendsGlobalFields(t *testing.T) {
 	logger := slog.New(globalHandler)
 	logger.Info("request received", "method", "GET")
 
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 
 	require.Equal(t, "staging", fields["env"])
 	require.Equal(t, "GET", fields["method"])
@@ -36,7 +61,7 @@ func TestGlobalFieldsHandler_AppendsGlobalFields(t *testing.T) {
 func TestGlobalFieldsHandler_WithAttrs_AppendsExtraFields(t *testing.T) {
 	var captured slog.Record
 
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -51,7 +76,7 @@ func TestGlobalFieldsHandler_WithAttrs_AppendsExtraFields(t *testing.T) {
 	logger := slog.New(handlerWithAttrs)
 	logger.Info("request received", "method", "GET")
 
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 
 	require.Equal(t, "staging", fields["env"])
 	require.Equal(t, "api", fields["component"])
@@ -61,7 +86,7 @@ func TestGlobalFieldsHandler_WithAttrs_AppendsExtraFields(t *testing.T) {
 func TestGlobalFieldsHandler_OverrideFalse_PreservesExistingFields(t *testing.T) {
 	var captured slog.Record
 
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -72,7 +97,7 @@ func TestGlobalFieldsHandler_OverrideFalse_PreservesExistingFields(t *testing.T)
 	logger := slog.New(globalHandler)
 	logger.Info("request received", "env", "production")
 
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 
 	require.Equal(t, "production", fields["env"], "should not override existing field when override=false")
 }
@@ -80,7 +105,7 @@ func TestGlobalFieldsHandler_OverrideFalse_PreservesExistingFields(t *testing.T)
 func TestGlobalFieldsHandler_OverrideTrue_ReplacesFields(t *testing.T) {
 	var captured slog.Record
 
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -91,14 +116,14 @@ func TestGlobalFieldsHandler_OverrideTrue_ReplacesFields(t *testing.T) {
 	logger := slog.New(globalHandler)
 	logger.Info("request received", "env", "production")
 
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 
 	require.Equal(t, "staging", fields["env"], "should override existing field when override=true")
 }
 
 func TestGlobalFieldsHandler_WithGroup(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -117,7 +142,7 @@ func TestGlobalFieldsHandler_WithGroup(t *testing.T) {
 	logger.Info("user login", "user_id", "12345")
 
 	// Verify that the log was captured with global fields
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 	assert.Equal(t, "auth", fields["service"], "global service field should be present")
 	assert.Equal(t, "1.0", fields["version"], "global version field should be present")
 	assert.Equal(t, "12345", fields["user_id"], "user_id field should be present")
@@ -126,7 +151,7 @@ func TestGlobalFieldsHandler_WithGroup(t *testing.T) {
 
 func TestGlobalFieldsHandler_WithGroup_EmptyGroup(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -144,7 +169,7 @@ func TestGlobalFieldsHandler_WithGroup_EmptyGroup(t *testing.T) {
 	logger.Info("test message", "key", "value")
 
 	// Verify that the log was captured with global fields
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 	assert.Equal(t, "production", fields["env"], "global env field should be present")
 	assert.Equal(t, "value", fields["key"], "key field should be present")
 	assert.Equal(t, "test message", captured.Message, "message should be captured correctly")
@@ -152,7 +177,7 @@ func TestGlobalFieldsHandler_WithGroup_EmptyGroup(t *testing.T) {
 
 func TestGlobalFieldsHandler_WithGroup_PreservesOverride(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -171,14 +196,14 @@ func TestGlobalFieldsHandler_WithGroup_PreservesOverride(t *testing.T) {
 	logger.Info("api call", "env", "production")
 
 	// Verify that the global field overrides the local one
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 	assert.Equal(t, "staging", fields["env"], "global env field should override local env field when override=true")
 	assert.Equal(t, "api call", captured.Message, "message should be captured correctly")
 }
 
 func TestGlobalFieldsHandler_WithGroup_WithAttrs_Integration(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -200,7 +225,7 @@ func TestGlobalFieldsHandler_WithGroup_WithAttrs_Integration(t *testing.T) {
 	logger.Info("payment processed", "amount", "100.00", "currency", "USD")
 
 	// Verify that all fields are present
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 	assert.Equal(t, "payment", fields["service"], "global service field should be present")
 	assert.Equal(t, "2.0", fields["version"], "global version field should be present")
 	assert.Equal(t, "processor", fields["component"], "component field should be present")
@@ -211,7 +236,7 @@ func TestGlobalFieldsHandler_WithGroup_WithAttrs_Integration(t *testing.T) {
 
 func TestGlobalFieldsHandler_WithGroup_MultipleGroups(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -229,7 +254,7 @@ func TestGlobalFieldsHandler_WithGroup_MultipleGroups(t *testing.T) {
 	logger.Info("request processed", "method", "POST")
 
 	// Verify that global fields are still present
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 	assert.Equal(t, "development", fields["env"], "global env field should be present")
 	assert.Equal(t, "POST", fields["method"], "method field should be present")
 	assert.Equal(t, "request processed", captured.Message, "message should be captured correctly")
@@ -237,7 +262,7 @@ func TestGlobalFieldsHandler_WithGroup_MultipleGroups(t *testing.T) {
 
 func TestGlobalFieldsHandler_WithGroup_ContextLogging(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -254,7 +279,7 @@ func TestGlobalFieldsHandler_WithGroup_ContextLogging(t *testing.T) {
 	logger.InfoContext(ctx, "email sent", "recipient", "user@example.com")
 
 	// Verify that the log was captured with global fields
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 	assert.Equal(t, "notification", fields["service"], "global service field should be present")
 	assert.Equal(t, "user@example.com", fields["recipient"], "recipient field should be present")
 	assert.Equal(t, "email sent", captured.Message, "message should be captured correctly")
@@ -262,7 +287,7 @@ func TestGlobalFieldsHandler_WithGroup_ContextLogging(t *testing.T) {
 
 func TestGlobalFieldsHandler_WithGroup_DifferentLevels(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -278,14 +303,14 @@ func TestGlobalFieldsHandler_WithGroup_DifferentLevels(t *testing.T) {
 
 	// Debug level
 	logger.Debug("query executed", "duration", "10ms")
-	fields := utils.ExtractAttrs(captured)
+	fields := flattenAttrs(captured)
 	assert.Equal(t, "database", fields["component"], "global component field should be present")
 	assert.Equal(t, "10ms", fields["duration"], "duration field should be present")
 	assert.Equal(t, "query executed", captured.Message, "debug message should be captured correctly")
 
 	// Error level
 	logger.Error("query failed", "error", "connection timeout")
-	fields = utils.ExtractAttrs(captured)
+	fields = flattenAttrs(captured)
 	assert.Equal(t, "database", fields["component"], "global component field should be present")
 	assert.Equal(t, "connection timeout", fields["error"], "error field should be present")
 	assert.Equal(t, "query failed", captured.Message, "error message should be captured correctly")

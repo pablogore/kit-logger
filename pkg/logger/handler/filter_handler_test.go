@@ -5,15 +5,16 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
 
 func TestFilterHandler_ExcludesMatchingKey(t *testing.T) {
 	var received bool
 
-	base := handler.NewTestHandler(func(_ context.Context, _ slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
 		received = true
 	})
 
@@ -30,7 +31,7 @@ func TestFilterHandler_ExcludesMatchingKey(t *testing.T) {
 func TestFilterHandler_ExcludesMatchingKeyValue(t *testing.T) {
 	var received bool
 
-	base := handler.NewTestHandler(func(_ context.Context, _ slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
 		received = true
 	})
 
@@ -47,7 +48,7 @@ func TestFilterHandler_ExcludesMatchingKeyValue(t *testing.T) {
 func TestFilterHandler_AllowsNonMatching(t *testing.T) {
 	var received bool
 
-	base := handler.NewTestHandler(func(_ context.Context, _ slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
 		received = true
 	})
 
@@ -63,7 +64,7 @@ func TestFilterHandler_AllowsNonMatching(t *testing.T) {
 
 func TestFilterHandler_WithAttrs(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -115,7 +116,7 @@ func TestFilterHandler_WithAttrs(t *testing.T) {
 
 func TestFilterHandler_WithGroup(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -144,7 +145,7 @@ func TestFilterHandler_WithGroup(t *testing.T) {
 
 func TestFilterHandler_WithAttrs_EmptyAttrs(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -167,7 +168,7 @@ func TestFilterHandler_WithAttrs_EmptyAttrs(t *testing.T) {
 
 func TestFilterHandler_WithGroup_EmptyGroup(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -190,7 +191,7 @@ func TestFilterHandler_WithGroup_EmptyGroup(t *testing.T) {
 
 func TestFilterHandler_WithAttrsAndGroup_Integration(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -221,30 +222,38 @@ func TestFilterHandler_WithAttrsAndGroup_Integration(t *testing.T) {
 	// Verify that the log was captured with all attributes
 	assert.Equal(t, "login attempt", captured.Message)
 
+	// service/version were added before WithGroup, so they stay top-level;
+	// username/status were added after, so a correct WithGroup nests them
+	// inside "user".
 	var hasService, hasVersion, hasUsername, hasStatus bool
 	captured.Attrs(func(a slog.Attr) bool {
-		switch a.Key {
-		case "service":
+		switch {
+		case a.Key == "service":
 			hasService = true
-		case "version":
+		case a.Key == "version":
 			hasVersion = true
-		case "username":
-			hasUsername = true
-		case "status":
-			hasStatus = true
+		case a.Key == "user" && a.Value.Kind() == slog.KindGroup:
+			for _, sub := range a.Value.Group() {
+				switch sub.Key {
+				case "username":
+					hasUsername = true
+				case "status":
+					hasStatus = true
+				}
+			}
 		}
 		return true
 	})
 
 	assert.True(t, hasService, "service attribute should be present")
 	assert.True(t, hasVersion, "version attribute should be present")
-	assert.True(t, hasUsername, "username attribute should be present")
-	assert.True(t, hasStatus, "status attribute should be present")
+	assert.True(t, hasUsername, "username attribute should be present inside the user group")
+	assert.True(t, hasStatus, "status attribute should be present inside the user group")
 }
 
 func TestFilterHandler_WithAttrs_PreservesRules(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 
@@ -278,7 +287,7 @@ func TestFilterHandler_WithAttrs_PreservesRules(t *testing.T) {
 
 func TestFilterHandler_WithGroup_PreservesRules(t *testing.T) {
 	var captured slog.Record
-	base := handler.NewTestHandler(func(_ context.Context, r slog.Record) {
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		captured = r
 	})
 

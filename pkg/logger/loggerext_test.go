@@ -1,11 +1,35 @@
 package logger
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+// stubLogger is a minimal Logger double for tests in this file. It can't use
+// kitlogtest.MockLogger: that package imports this one, and an internal test
+// file (package logger, not logger_test) importing anything that re-imports
+// logger is a compile-time import cycle.
+type stubLogger struct{}
+
+func (s *stubLogger) Debug(string, ...any)                            {}
+func (s *stubLogger) Info(string, ...any)                             {}
+func (s *stubLogger) Warn(string, ...any)                             {}
+func (s *stubLogger) Error(string, ...any)                            {}
+func (s *stubLogger) DebugContext(context.Context, string, ...any)    {}
+func (s *stubLogger) InfoContext(context.Context, string, ...any)     {}
+func (s *stubLogger) WarnContext(context.Context, string, ...any)     {}
+func (s *stubLogger) ErrorContext(context.Context, string, ...any)    {}
+func (s *stubLogger) Log(context.Context, slog.Level, string, ...any) {}
+func (s *stubLogger) With(...any) Logger                              { return s }
+func (s *stubLogger) WithContext(context.Context) Logger              { return s }
+func (s *stubLogger) SetLevel(slog.Level)                             {}
+func (s *stubLogger) Sync() error                                     { return nil }
+func (s *stubLogger) Slog() *slog.Logger                              { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func TestExitWithFlush_WithFlusher(t *testing.T) {
 	// Create a logger that implements Sync
@@ -24,7 +48,7 @@ func TestExitWithFlush_WithFlusher(t *testing.T) {
 
 func TestExitWithFlush_WithoutFlusher(t *testing.T) {
 	// Create a logger that doesn't implement Sync
-	mockLogger := NewMockLogger()
+	mockLogger := &stubLogger{}
 	SetGlobal(mockLogger)
 
 	// Test that the function can be called without panic
@@ -97,7 +121,7 @@ func TestEnsureLoggerOnce_FirstCall(t *testing.T) {
 
 func TestEnsureLoggerOnce_SubsequentCalls(t *testing.T) {
 	// Set initial logger
-	initialLogger := NewMockLogger()
+	initialLogger := &stubLogger{}
 	SetGlobal(initialLogger)
 
 	// Test subsequent calls with different config
@@ -265,7 +289,7 @@ func TestLoggerExtension_EdgeCases(t *testing.T) {
 
 func TestLoggerExtension_WithCustomLogger(t *testing.T) {
 	// Set a custom logger
-	customLogger := NewMockLogger()
+	customLogger := &stubLogger{}
 	SetGlobal(customLogger)
 
 	// Try to ensure logger once

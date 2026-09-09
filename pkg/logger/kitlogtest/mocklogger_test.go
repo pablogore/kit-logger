@@ -1,11 +1,15 @@
-package logger
+package kitlogtest
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 )
 
 func TestNewMockLogger(t *testing.T) {
@@ -212,6 +216,63 @@ func TestMockLogger_Slog(t *testing.T) {
 	slogLogger := logger.Slog()
 	assert.NotNil(t, slogLogger)
 	assert.IsType(t, &slog.Logger{}, slogLogger)
+}
+
+// TestMockLogger_Slog_DoesNotPanic pins KITLOG-GO-017: Slog() used to return
+// slog.New(slog.NewTextHandler(nil, nil)), a handler with a nil io.Writer that
+// panics on its first write. A logger installed via SetGlobalAndSlogDefault
+// must be safe for any code that logs through the standard library.
+func TestMockLogger_Slog_DoesNotPanic(t *testing.T) {
+	logger := NewMockLogger()
+
+	assert.NotPanics(t, func() {
+		logger.Slog().Info("via slog", "key", "value")
+	})
+}
+
+// TestMockLogger_Slog_SharesEntriesWithDirectCalls asserts that Slog() and the
+// Logger methods observe the same log stream, so a test cannot get a
+// different answer depending on which face of MockLogger it exercises.
+func TestMockLogger_Slog_SharesEntriesWithDirectCalls(t *testing.T) {
+	logger := NewMockLogger()
+
+	logger.Info("direct call")
+	logger.Slog().Info("via slog", "key", "value")
+
+	require.Len(t, logger.Entries, 2)
+	assert.Equal(t, "direct call", logger.Entries[0].Message)
+
+	entry := logger.Entries[1]
+	assert.Equal(t, slog.LevelInfo, entry.Level)
+	assert.Equal(t, "via slog", entry.Message)
+	require.Len(t, entry.Args, 1)
+	assert.Equal(t, slog.String("key", "value"), entry.Args[0])
+}
+
+// TestMockLogger_LifecycleIsHonest asserts that MockLogger implements
+// ManagedLogger honestly: it records that Flush and Shutdown were called,
+// lets a test inject the error each should return, and rejects records
+// logged after Shutdown instead of quietly accepting them.
+func TestMockLogger_LifecycleIsHonest(t *testing.T) {
+	mock := NewMockLogger()
+
+	require.NoError(t, mock.Flush(context.Background()))
+	require.NoError(t, mock.Sync())
+	assert.Equal(t, 2, mock.FlushCalls(), "Sync must count as a Flush")
+
+	mock.FlushErr = errors.New("flush failed")
+	assert.ErrorIs(t, mock.Flush(context.Background()), mock.FlushErr)
+
+	mock.Info("before shutdown")
+	require.Len(t, mock.Entries, 1)
+
+	require.NoError(t, mock.Shutdown(context.Background()))
+	assert.Equal(t, 1, mock.ShutdownCalls())
+
+	mock.Info("after shutdown")
+	assert.Len(t, mock.Entries, 1, "a shut-down mock must not record new entries")
+	assert.Equal(t, []error{kitlog.ErrLoggerShutdown}, mock.RejectedErrors())
+	assert.ErrorIs(t, mock.Flush(context.Background()), kitlog.ErrLoggerShutdown)
 }
 
 func TestMockLogger_ConcurrentAccess(t *testing.T) {

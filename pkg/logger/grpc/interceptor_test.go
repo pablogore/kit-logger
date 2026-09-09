@@ -6,16 +6,17 @@ import (
 	"testing"
 	"time"
 
+	kitlog "github.com/pablogore/kit-logger/pkg/logger"
+	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 )
 
 func TestUnaryLoggingInterceptor_Success(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create interceptor
@@ -47,7 +48,7 @@ func TestUnaryLoggingInterceptor_Success(t *testing.T) {
 
 func TestUnaryLoggingInterceptor_Error(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create interceptor
@@ -80,7 +81,7 @@ func TestUnaryLoggingInterceptor_Error(t *testing.T) {
 
 func TestUnaryLoggingInterceptor_GRPCError(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create interceptor
@@ -113,7 +114,7 @@ func TestUnaryLoggingInterceptor_GRPCError(t *testing.T) {
 
 func TestUnaryLoggingInterceptor_ContextWithValues(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create interceptor
@@ -147,7 +148,7 @@ func TestUnaryLoggingInterceptor_ContextWithValues(t *testing.T) {
 
 func TestUnaryLoggingInterceptor_DifferentMethods(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create interceptor
@@ -171,7 +172,7 @@ func TestUnaryLoggingInterceptor_DifferentMethods(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create new mock logger for each test
-			mockLogger := kitlog.NewMockLogger()
+			mockLogger := kitlogtest.NewMockLogger()
 			kitlog.SetGlobal(mockLogger)
 
 			// Mock gRPC info
@@ -197,7 +198,7 @@ func TestUnaryLoggingInterceptor_DifferentMethods(t *testing.T) {
 
 func TestUnaryLoggingInterceptor_Performance(t *testing.T) {
 	// Setup mock logger
-	mockLogger := kitlog.NewMockLogger()
+	mockLogger := kitlogtest.NewMockLogger()
 	kitlog.SetGlobal(mockLogger)
 
 	// Create interceptor
@@ -250,7 +251,7 @@ func TestUnaryLoggingInterceptor_ErrorStatusCodes(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup mock logger
-			mockLogger := kitlog.NewMockLogger()
+			mockLogger := kitlogtest.NewMockLogger()
 			kitlog.SetGlobal(mockLogger)
 
 			// Create interceptor

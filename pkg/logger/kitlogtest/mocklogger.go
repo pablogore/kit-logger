@@ -1,9 +1,15 @@
-package logger
+// Package kitlogtest holds kit-logger's test doubles: MockLogger and
+// TestHandler. They exist to be imported from tests, never from production
+// code, so they live outside pkg/logger and its sibling packages rather than
+// shipping as part of the library's public API surface.
+package kitlogtest
 
 import (
 	"context"
 	"log/slog"
 	"sync"
+
+	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 )
 
 // LogEntry represents a log captured by the MockLogger.
@@ -34,6 +40,11 @@ type MockLogger struct {
 	shutdown      bool
 	rejected      []error
 }
+
+var (
+	_ kitlog.Logger        = (*MockLogger)(nil)
+	_ kitlog.ManagedLogger = (*MockLogger)(nil)
+)
 
 func NewMockLogger() *MockLogger {
 	return &MockLogger{}
@@ -73,7 +84,7 @@ func (m *MockLogger) log(ctx context.Context, level slog.Level, msg string, args
 	if m.shutdown {
 		// Mirror SlogLogger: a shut-down logger records nothing and reports
 		// the rejection instead of pretending the write succeeded.
-		m.rejected = append(m.rejected, ErrLoggerShutdown)
+		m.rejected = append(m.rejected, kitlog.ErrLoggerShutdown)
 		return
 	}
 	m.Entries = append(m.Entries, LogEntry{
@@ -84,9 +95,9 @@ func (m *MockLogger) log(ctx context.Context, level slog.Level, msg string, args
 	})
 }
 
-func (m *MockLogger) With(_ ...any) Logger { return m }
+func (m *MockLogger) With(_ ...any) kitlog.Logger { return m }
 
-func (m *MockLogger) WithContext(_ context.Context) Logger { return m }
+func (m *MockLogger) WithContext(_ context.Context) kitlog.Logger { return m }
 
 func (m *MockLogger) SetLevel(_ slog.Level) {}
 
@@ -97,7 +108,7 @@ func (m *MockLogger) Flush(ctx context.Context) error {
 	defer m.mu.Unlock()
 	m.flushCalls++
 	if m.shutdown {
-		return ErrLoggerShutdown
+		return kitlog.ErrLoggerShutdown
 	}
 	return m.FlushErr
 }
@@ -150,6 +161,21 @@ func (m *MockLogger) HasMessage(expected string) bool {
 	return false
 }
 
+// Slog returns a *slog.Logger backed by the same MockLogger: records emitted
+// through it land in Entries exactly like a direct Info/Error call, so a test
+// cannot observe divergent behavior depending on which face it logs through.
+//
+// The previous implementation handed back slog.New(slog.NewTextHandler(nil,
+// nil)) -- a handler with a nil io.Writer that panics on its first write, a
+// landmine for any code that calls MockLogger.Slog() (or SetGlobalAndSlogDefault
+// with a MockLogger) and then logs through the standard library.
 func (m *MockLogger) Slog() *slog.Logger {
-	return slog.New(slog.NewTextHandler(nil, nil))
+	return slog.New(NewTestHandler(func(ctx context.Context, r slog.Record) {
+		args := make([]any, 0, r.NumAttrs())
+		r.Attrs(func(a slog.Attr) bool {
+			args = append(args, a)
+			return true
+		})
+		m.log(ctx, r.Level, r.Message, args...)
+	}))
 }

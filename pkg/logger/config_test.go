@@ -17,16 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSetGlobal(t *testing.T) {
-	// Test setting global logger
-	mockLogger := NewMockLogger()
-	SetGlobal(mockLogger)
-
-	// Verify global logger is set -- by identity, so a copy or a torn value
-	// would not pass.
-	assert.Same(t, mockLogger, L())
-}
-
 func TestL_WithNilLogger(t *testing.T) {
 	// Reset global logger
 	resetGlobalsForTest()
@@ -35,16 +25,6 @@ func TestL_WithNilLogger(t *testing.T) {
 	logger := L()
 	assert.NotNil(t, logger)
 	assert.IsType(t, &SlogLogger{}, logger)
-}
-
-func TestL_WithExistingLogger(t *testing.T) {
-	// Set existing logger
-	mockLogger := NewMockLogger()
-	SetGlobal(mockLogger)
-
-	// Test L() returns existing logger
-	logger := L()
-	assert.Equal(t, mockLogger, logger)
 }
 
 func TestNew_WithMinimalConfig(t *testing.T) {
