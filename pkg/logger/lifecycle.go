@@ -111,14 +111,25 @@ func collectFlushers(h slog.Handler) []Flusher {
 type lifecycleGroup struct {
 	handlers []Flusher
 
-	once    sync.Once
-	done    chan struct{}
-	err     error
-	stopped atomic.Bool
+	// startOnce launches the shutdown exactly once. Starting the shutdown and
+	// waiting for it are deliberately separate: the shutdown is one shared
+	// operation, and each caller only decides how long it is willing to wait
+	// for it.
+	startOnce sync.Once
 
-	// rejected counts the records discarded because the logger was already
-	// shut down when they were submitted. Without it those records would be
-	// accounted for nowhere: they never reach a handler, so no handler
+	// done is closed once the shutdown has run to completion, after err has
+	// been written. A caller that receives from it therefore observes the
+	// final err with no further synchronisation.
+	done chan struct{}
+	err  error
+
+	// stopping is set before the first handler is asked to stop, so admission
+	// closes at the instant the shutdown begins rather than when it finishes.
+	stopping atomic.Bool
+
+	// rejected counts the records discarded because the logger's shutdown had
+	// already begun when they were submitted. Without it those records would
+	// be accounted for nowhere: they never reach a handler, so no handler
 	// counter can see them.
 	rejected atomic.Uint64
 }
@@ -127,8 +138,10 @@ func newLifecycleGroup(handlers ...Flusher) *lifecycleGroup {
 	return &lifecycleGroup{handlers: handlers, done: make(chan struct{})}
 }
 
-func (g *lifecycleGroup) isStopped() bool {
-	return g != nil && g.stopped.Load()
+// isStopping reports whether the logger has stopped accepting records. It turns
+// true when the shutdown starts, not when it completes.
+func (g *lifecycleGroup) isStopping() bool {
+	return g != nil && g.stopping.Load()
 }
 
 // rejectRecord accounts for one record discarded after shutdown.
@@ -149,7 +162,7 @@ func (g *lifecycleGroup) flush(ctx context.Context) error {
 	if g == nil {
 		return nil
 	}
-	if g.stopped.Load() {
+	if g.stopping.Load() {
 		return ErrLoggerShutdown
 	}
 	if ctx == nil {
@@ -165,12 +178,21 @@ func (g *lifecycleGroup) flush(ctx context.Context) error {
 	return first
 }
 
-// shutdown runs the drain exactly once and reports the same result to every
-// caller, including the hundredth concurrent one.
+// shutdown starts the shutdown once and then waits for it under ctx.
 //
-// A caller that did not win the race waits for the winner rather than returning
-// a fabricated nil — but it still honours its own context, so a caller with a
-// tight deadline is never held hostage by a slower one.
+// Starting and waiting are separate on purpose. Letting the first caller run
+// the drain under its own context would make that context global: a caller
+// with a 1ms deadline would freeze the result for a caller that was willing to
+// wait five seconds, and every later caller would inherit a
+// DeadlineExceeded that describes nobody's situation but the first one's. The
+// underlying worker does not stop draining when a context expires anyway
+// (see BufferedHandler), so a frozen error would also be a lie about what the
+// pipeline actually did.
+//
+// So the shutdown is one shared operation with no deadline of its own, and ctx
+// bounds only how long this caller waits for it. Callers that wait to the end
+// all observe the same final error; a caller that gives up early gets its own
+// ctx.Err() and the operation keeps going.
 func (g *lifecycleGroup) shutdown(ctx context.Context) error {
 	if g == nil {
 		return nil
@@ -179,16 +201,19 @@ func (g *lifecycleGroup) shutdown(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	ran := false
-	g.once.Do(func() {
-		ran = true
-		g.err = g.shutdownAll(ctx)
-		g.stopped.Store(true)
-		close(g.done)
+	g.startOnce.Do(func() {
+		// Close admission first. Every handler shutdown below stops accepting
+		// records as its own first step, so leaving this until the drain is
+		// over would open a window in which a record passes the logger-level
+		// gate — consuming a rate-limit token and firing a counter — only to
+		// be rejected by the handler underneath.
+		g.stopping.Store(true)
+
+		go func() {
+			g.err = g.shutdownAllToCompletion()
+			close(g.done)
+		}()
 	})
-	if ran {
-		return g.err
-	}
 
 	select {
 	case <-g.done:
@@ -198,20 +223,21 @@ func (g *lifecycleGroup) shutdown(ctx context.Context) error {
 	}
 }
 
-func (g *lifecycleGroup) shutdownAll(ctx context.Context) error {
-	// An already-expired context still stops every handler from accepting new
-	// records — that part costs nothing and must happen — but it buys no
-	// draining time, and the deadline is what the caller has to hear about.
-	expired := ctx.Err()
-
+// shutdownAllToCompletion stops every lifecycle handler and waits for each one
+// to finish draining.
+//
+// It uses a context with no deadline because the drain's duration belongs to
+// the handlers, not to whichever caller happened to start it. That is not an
+// unbounded wait dressed up as a bounded one: this goroutine lives exactly as
+// long as the handler workers it waits on, so a downstream handler that blocks
+// forever holds this goroutine and its own worker — the same worker it was
+// already holding before this change.
+func (g *lifecycleGroup) shutdownAllToCompletion() error {
 	var first error
 	for _, f := range g.handlers {
-		if err := translateLifecycleErr(f.Shutdown(ctx)); err != nil && first == nil {
+		if err := translateLifecycleErr(f.Shutdown(context.Background())); err != nil && first == nil {
 			first = err
 		}
-	}
-	if expired != nil {
-		return expired
 	}
 	return first
 }

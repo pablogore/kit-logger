@@ -22,6 +22,10 @@ type lifecycleRecorder struct {
 	delay time.Duration
 	err   error
 
+	// gate, when non-nil, blocks every delivery until it is closed. It lets a
+	// test hold the drain open and observe the pipeline mid-shutdown.
+	gate chan struct{}
+
 	mu   sync.Mutex
 	msgs []string
 }
@@ -29,6 +33,9 @@ type lifecycleRecorder struct {
 func (r *lifecycleRecorder) Enabled(context.Context, slog.Level) bool { return true }
 
 func (r *lifecycleRecorder) Handle(_ context.Context, record slog.Record) error {
+	if r.gate != nil {
+		<-r.gate
+	}
 	if r.delay > 0 {
 		time.Sleep(r.delay)
 	}
@@ -372,4 +379,124 @@ func TestMockLogger_LifecycleIsHonest(t *testing.T) {
 	assert.Len(t, mock.Entries, 1, "a shut-down mock must not record new entries")
 	assert.Equal(t, []error{ErrLoggerShutdown}, mock.RejectedErrors())
 	assert.ErrorIs(t, mock.Flush(context.Background()), ErrLoggerShutdown)
+}
+
+// countingCounterHook records how often each metric name was incremented.
+type countingCounterHook struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func (c *countingCounterHook) Inc(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[string]int)
+	}
+	c.counts[name]++
+}
+
+func (c *countingCounterHook) count(name string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.counts[name]
+}
+
+// TestShutdown_CallerContextBoundsOnlyThatCaller pins the ownership split: the
+// shutdown is one shared operation, and a context bounds how long its caller
+// waits — not how long the drain is allowed to take.
+//
+// The impatient caller must not be able to freeze the result for the patient
+// one, and it must not matter which of the two started the shutdown.
+func TestShutdown_CallerContextBoundsOnlyThatCaller(t *testing.T) {
+	rec := &lifecycleRecorder{delay: 20 * time.Millisecond}
+	log, buffered := newBufferedLogger(t, rec, 64)
+
+	sl, ok := log.(*SlogLogger)
+	require.True(t, ok)
+
+	// Roughly 200ms of drain, far beyond the impatient caller's deadline.
+	const queued = 10
+	for i := 0; i < queued; i++ {
+		log.Info("queued")
+	}
+
+	impatientCtx, cancelImpatient := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancelImpatient()
+	patientCtx, cancelPatient := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelPatient()
+
+	// The impatient caller has to be the one that starts the shutdown, or the
+	// test would pass by luck: if the patient caller started it, it would own
+	// the drain and the assertions below would hold for the wrong reason.
+	// Admission closes inside the start path, so isStopping is the signal that
+	// the impatient caller got there first.
+	impatient := make(chan error, 1)
+	go func() { impatient <- log.Shutdown(impatientCtx) }()
+	require.Eventually(t, sl.lifecycle.isStopping, time.Second, 100*time.Microsecond,
+		"the impatient caller must be the one that starts the shutdown")
+
+	patient := make(chan error, 1)
+	go func() { patient <- log.Shutdown(patientCtx) }()
+
+	assert.ErrorIs(t, <-impatient, context.DeadlineExceeded,
+		"the impatient caller must hear about its own deadline")
+	assert.NoError(t, <-patient,
+		"the patient caller must get the real result, not the impatient caller's deadline")
+
+	assert.Len(t, rec.messages(), queued,
+		"an early deadline must not cut the drain short for everyone")
+	assert.Zero(t, buffered.Queued())
+
+	// A later caller inherits the completed result, not the expired deadline.
+	assert.NoError(t, log.Shutdown(context.Background()))
+
+	for i := 0; i < 5; i++ {
+		log.Info("after shutdown")
+	}
+	assert.Equal(t, uint64(5), sl.Rejected())
+	assert.Len(t, rec.messages(), queued)
+	assert.Zero(t, buffered.Rejected(), "a rejected record must not have reached the buffer")
+}
+
+// TestShutdown_ClosesAdmissionBeforeDraining holds the drain open and checks the
+// admission boundary from inside that window: a record submitted while the
+// shutdown is in flight is rejected at the logger, so it consumes no
+// rate-limit token, fires no counter, and never reaches the buffer.
+func TestShutdown_ClosesAdmissionBeforeDraining(t *testing.T) {
+	release := make(chan struct{})
+	rec := &lifecycleRecorder{gate: release}
+	counter := &countingCounterHook{}
+
+	buffered := handler.NewBufferedHandler(rec, 8)
+	hooked := handler.NewHookHandler(buffered, func(ctx context.Context, _ slog.Record) (context.Context, bool) {
+		return ctx, true
+	})
+
+	sl, ok := New(Config{Handler: hooked}, WithCounterHook(counter)).(*SlogLogger)
+	require.True(t, ok)
+
+	sl.Info("accepted", WithCounter("emitted"))
+	sl.Info("accepted", WithRateLimit("gate-key", time.Hour), WithCounter("emitted"))
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- sl.Shutdown(context.Background()) }()
+
+	require.Eventually(t, sl.lifecycle.isStopping, time.Second, time.Millisecond,
+		"admission must close when the shutdown starts, not when it finishes")
+
+	countBefore := counter.count("emitted")
+
+	sl.Info("during drain", WithCounter("emitted"))
+	sl.Info("during drain", WithRateLimit("gate-key", time.Hour), WithCounter("emitted"))
+
+	assert.Equal(t, uint64(2), sl.Rejected())
+	assert.Zero(t, buffered.Rejected(),
+		"a record rejected at the logger must never reach the buffer")
+	assert.Equal(t, countBefore, counter.count("emitted"),
+		"a record submitted after the shutdown started must fire no counter")
+
+	close(release)
+	require.NoError(t, <-shutdownDone)
+	assert.Len(t, rec.messages(), 2)
 }

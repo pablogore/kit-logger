@@ -59,10 +59,16 @@ if managed, ok := log.(logger.ManagedLogger); ok {
   delivered downstream, or `ctx` expires — in which case it returns `ctx.Err()`.
   It does not stop the logger.
 - `Shutdown(ctx)` stops accepting records, delivers what it already accepted and
-  releases the worker. It is idempotent and safe to call concurrently; every
-  caller sees the same result.
-- Records logged after `Shutdown` are discarded. They never panic and never
-  block, and they are counted by `(*SlogLogger).Rejected()`.
+  releases the worker. It is idempotent and safe to call concurrently: the
+  shutdown is started once and shared, and `ctx` bounds how long *that call*
+  waits for it — not how long the drain is allowed to take. A caller with a
+  tight deadline gets its own `ctx.Err()` and cannot cut short a drain another
+  caller was willing to wait for; every caller that waits to the end sees the
+  same result.
+- Admission closes the moment `Shutdown` starts, not when it finishes. Records
+  submitted from that point on are discarded before they consume a rate-limit
+  token or fire a counter; they never panic and never block, and they are
+  counted by `(*SlogLogger).Rejected()`.
 - `Sync()` is `Flush(context.Background())`. It stays on the `Logger` interface
   for source compatibility and is deprecated in favour of the context-aware
   methods.

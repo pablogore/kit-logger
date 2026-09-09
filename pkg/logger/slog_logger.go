@@ -166,10 +166,12 @@ func orBackground(ctx context.Context) context.Context {
 // It is only reached once the level is known to be enabled, so a suppressed
 // level consumes no rate-limit token and fires no counter.
 func (l *SlogLogger) logRateAware(args []any, emit func([]any)) {
-	// A shut-down logger accepts nothing: no record, no rate-limit token and
-	// no counter increment. Dropping here rather than inside emit is what
-	// keeps a post-Shutdown call free of side effects.
-	if l.lifecycle.isStopped() {
+	// A logger whose shutdown has begun accepts nothing: no record, no
+	// rate-limit token and no counter increment. Dropping here rather than
+	// inside emit is what keeps such a call free of side effects, and the gate
+	// closes when the shutdown starts rather than when it ends so there is no
+	// window where this passes and the handler underneath rejects.
+	if l.lifecycle.isStopping() {
 		l.lifecycle.rejectRecord()
 		return
 	}
@@ -237,15 +239,20 @@ func (l *SlogLogger) Flush(ctx context.Context) error {
 // releases the resources held by the pipeline. It returns ctx.Err() if ctx
 // expires before the drain completes.
 //
-// Shutdown is idempotent and safe to call concurrently: every caller sees the
-// same result. Log calls after Shutdown are discarded; they never panic and
-// never block.
+// Shutdown is idempotent and safe to call concurrently. It is started once and
+// shared: ctx bounds how long this call waits for it, not how long the drain is
+// allowed to take, so a caller with a tight deadline cannot cut short a drain
+// another caller was willing to wait for. Every caller that waits to the end
+// sees the same result.
+//
+// Records logged from the moment Shutdown starts are discarded; they never
+// panic and never block.
 func (l *SlogLogger) Shutdown(ctx context.Context) error {
 	return l.lifecycle.shutdown(ctx)
 }
 
-// Rejected is the number of records discarded because the logger had already
-// been shut down when they were submitted.
+// Rejected is the number of records discarded because the logger's shutdown had
+// already begun when they were submitted.
 //
 // Records rejected or dropped by the buffer itself are counted by the buffered
 // handler, not here. Together the three counters account for every record a
