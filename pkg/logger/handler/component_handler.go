@@ -94,3 +94,8 @@ func simplifyFuncName(fn string) string {
 	}
 	return fn
 }
+
+// Unwrap returns the handler this one decorates. It lets a logger lifecycle
+// (Flush, Shutdown) traverse a chain that was assembled by hand, instead of
+// stopping at the outermost handler.
+func (h *ComponentHandler) Unwrap() slog.Handler { return h.next }

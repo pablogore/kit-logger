@@ -62,3 +62,8 @@ func (h *FilterHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 func (h *FilterHandler) WithGroup(name string) slog.Handler {
 	return NewFilterHandler(h.next.WithGroup(name), h.rules)
 }
+
+// Unwrap returns the handler this one decorates. It lets a logger lifecycle
+// (Flush, Shutdown) traverse a chain that was assembled by hand, instead of
+// stopping at the outermost handler.
+func (h *FilterHandler) Unwrap() slog.Handler { return h.next }

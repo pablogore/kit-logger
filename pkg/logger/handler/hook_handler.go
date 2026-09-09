@@ -52,3 +52,8 @@ func (h *HookHandler) WithGroup(name string) slog.Handler {
 		hook: h.hook,
 	}
 }
+
+// Unwrap returns the handler this one decorates. It lets a logger lifecycle
+// (Flush, Shutdown) traverse a chain that was assembled by hand, instead of
+// stopping at the outermost handler.
+func (h *HookHandler) Unwrap() slog.Handler { return h.next }
