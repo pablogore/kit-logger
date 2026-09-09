@@ -807,6 +807,210 @@ func TestSamplingHandler_EvictionStartsNoGoroutine(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// small MaxKeys bounds (KITLOG-GO-026)
+// ---------------------------------------------------------------------------
+
+// samFeedDistinct records n distinct keys and reports the largest TrackedKeys
+// ever observed, sampling after *every* record.
+//
+// Checking only the final size would miss the defect entirely: the map settles
+// back inside the bound as soon as the next eviction runs, so the overshoot is
+// only visible in the instant between the eviction pass and the insert that
+// follows it.
+func samFeedDistinct(t *testing.T, h *handler.SamplingHandler, n int) int {
+	t.Helper()
+	ctx := context.Background()
+	worst := 0
+	for i := 0; i < n; i++ {
+		require.NoError(t, h.Handle(ctx, samRecord(slog.LevelInfo, fmt.Sprintf("event-%d", i))))
+		if tracked := h.TrackedKeys(); tracked > worst {
+			worst = tracked
+		}
+	}
+	return worst
+}
+
+// TestSamplingHandler_SmallMaxKeysStayWithinTheBound pins the invariant that
+// TrackedKeys documents for every bound, not just the comfortable ones.
+//
+// The clock is frozen and Interval is an hour, so the semantic pass can never
+// reclaim anything: the oldest-quarter pass is the only thing standing between
+// the input and an unbounded map, which is exactly the code under test. With
+// an integer-division target, maxKeys/4 is zero for maxKeys <= 3 and the pass
+// frees no slot before the caller inserts, so 1, 2 and 3 settle one entry over
+// their own bound.
+func TestSamplingHandler_SmallMaxKeysStayWithinTheBound(t *testing.T) {
+	const distinct = 50
+
+	for _, maxKeys := range []int{1, 2, 3, 4, 8} {
+		t.Run(fmt.Sprintf("maxKeys=%d", maxKeys), func(t *testing.T) {
+			sink := &samSink{}
+			clock := newSamClock()
+			h := handler.NewSamplingHandler(sink, handler.SamplingConfig{
+				Interval:    time.Hour, // nothing ever goes stale
+				MinLevel:    slog.LevelInfo,
+				Probability: 1,
+				Now:         clock.Now,
+				MaxKeys:     maxKeys,
+			})
+
+			worst := samFeedDistinct(t, h, distinct)
+
+			require.LessOrEqual(t, worst, maxKeys,
+				"TrackedKeys must never exceed MaxKeys=%d, worst observed was %d", maxKeys, worst)
+			require.Equal(t, distinct, sink.count(),
+				"every key is a first sighting, so eviction must not cost a record")
+			require.Positive(t, h.Evicted(),
+				"%d distinct keys under MaxKeys=%d must have evicted something", distinct, maxKeys)
+		})
+	}
+}
+
+// TestSamplingHandler_MaxKeysOneDoesNotPanic guards the trap that the fix
+// itself opens.
+//
+// Freeing at least one slot means MaxKeys=1 has to evict its single entry,
+// which drives the survivor target to zero. A target of zero indexes the
+// sorted timestamp buffer one past its end, and a panic on the logging path is
+// a strictly worse defect than the overshoot it replaces. The bound is checked
+// after every record, so the state can never grow behind the panic check
+// either.
+func TestSamplingHandler_MaxKeysOneDoesNotPanic(t *testing.T) {
+	sink := &samSink{}
+	clock := newSamClock()
+	h := handler.NewSamplingHandler(sink, handler.SamplingConfig{
+		Interval:    time.Hour,
+		MinLevel:    slog.LevelInfo,
+		Probability: 1,
+		Now:         clock.Now,
+		MaxKeys:     1,
+	})
+
+	var worst int
+	require.NotPanics(t, func() { worst = samFeedDistinct(t, h, 500) },
+		"MaxKeys=1 drives the survivor target to zero; that must not index past the buffer")
+	require.LessOrEqual(t, worst, 1, "worst observed TrackedKeys was %d", worst)
+	require.Equal(t, 500, sink.count(), "every distinct key must still be emitted")
+}
+
+// TestSamplingHandler_EvictionAlwaysFreesASlot checks the progress property the
+// bound rests on, one bound at a time.
+//
+// A pass that returns without deleting anything is what lets the caller's
+// insert push the map over the limit, so it is worth asserting directly rather
+// than only through its consequence: Evicted must strictly grow across the
+// window in which eviction is forced to run.
+func TestSamplingHandler_EvictionAlwaysFreesASlot(t *testing.T) {
+	for _, maxKeys := range []int{1, 2, 3, 4, 8} {
+		t.Run(fmt.Sprintf("maxKeys=%d", maxKeys), func(t *testing.T) {
+			sink := &samSink{}
+			clock := newSamClock()
+			h := handler.NewSamplingHandler(sink, handler.SamplingConfig{
+				Interval:    time.Hour,
+				MinLevel:    slog.LevelInfo,
+				Probability: 1,
+				Now:         clock.Now,
+				MaxKeys:     maxKeys,
+			})
+
+			ctx := context.Background()
+			// Fill to capacity first: eviction only runs once the map is full.
+			for i := 0; i < maxKeys; i++ {
+				require.NoError(t, h.Handle(ctx, samRecord(slog.LevelInfo, fmt.Sprintf("fill-%d", i))))
+			}
+			require.Equal(t, maxKeys, h.TrackedKeys(), "the map must start full")
+			require.Zero(t, h.Evicted(), "filling to capacity must not evict")
+
+			// A pass only runs when the map is already full, so that is the
+			// precondition to key the assertion on: whenever a record arrives
+			// at a full map, the evicted counter must move. A larger bound
+			// frees a whole quarter at once and then coasts for a few inserts,
+			// which is why this cannot assert growth on every record.
+			prev := h.Evicted()
+			for i := 0; i < 10*maxKeys; i++ {
+				full := h.TrackedKeys() == maxKeys
+				require.NoError(t, h.Handle(ctx, samRecord(slog.LevelInfo, fmt.Sprintf("push-%d", i))))
+				if full {
+					require.Greater(t, h.Evicted(), prev,
+						"eviction ran with a full map and freed nothing at MaxKeys=%d", maxKeys)
+				}
+				require.LessOrEqual(t, h.TrackedKeys(), maxKeys)
+				prev = h.Evicted()
+			}
+			require.Positive(t, h.Evicted(), "the window must have forced at least one pass")
+		})
+	}
+}
+
+// TestSamplingHandler_EvictedCounterStaysHonest checks the counter alongside
+// the bound.
+//
+// A bound that holds while Evicted lies is not a fix: the counter is the only
+// way an operator sees that keys are being reclaimed at all. Under a frozen
+// clock nothing is reclaimed as stale and every key is distinct, so each
+// insertion is accounted for exactly once and the identity
+// evicted+tracked == distinct must hold on every path, including the one that
+// clears the whole map.
+func TestSamplingHandler_EvictedCounterStaysHonest(t *testing.T) {
+	newHandler := func(maxKeys int) (*handler.SamplingHandler, *samSink) {
+		sink := &samSink{}
+		clock := newSamClock()
+		return handler.NewSamplingHandler(sink, handler.SamplingConfig{
+			Interval:    time.Hour,
+			MinLevel:    slog.LevelInfo,
+			Probability: 1,
+			Now:         clock.Now,
+			MaxKeys:     maxKeys,
+		}), sink
+	}
+
+	t.Run("single entry dropped by the oldest-quarter pass", func(t *testing.T) {
+		// MaxKeys=4 evicts max(1, 4/4)=1 entry, so the arithmetic is exact:
+		// the fifth key triggers one pass that drops exactly one entry.
+		h, _ := newHandler(4)
+		samFeedDistinct(t, h, 5)
+
+		require.Equal(t, uint64(1), h.Evicted(), "one pass at MaxKeys=4 drops exactly one entry")
+		require.Equal(t, 4, h.TrackedKeys())
+	})
+
+	t.Run("clear-everything path at MaxKeys one", func(t *testing.T) {
+		// MaxKeys=1 leaves no survivors, so each of the two passes accounts
+		// for the single entry it wiped.
+		h, _ := newHandler(1)
+		samFeedDistinct(t, h, 3)
+
+		require.Equal(t, uint64(2), h.Evicted(),
+			"clearing the map must count every entry it removed, not zero")
+		require.Equal(t, 1, h.TrackedKeys())
+	})
+
+	t.Run("identical timestamps under a frozen clock", func(t *testing.T) {
+		// Every entry shares one instant, so the cutoff comparison deletes
+		// nothing and the arbitrary-drop fallback does all the work. The
+		// counter must follow that path just as honestly.
+		const (
+			maxKeys  = 8
+			distinct = 200
+		)
+		h, sink := newHandler(maxKeys)
+
+		ctx := context.Background()
+		prev := uint64(0)
+		for i := 0; i < distinct; i++ {
+			require.NoError(t, h.Handle(ctx, samRecord(slog.LevelInfo, fmt.Sprintf("event-%d", i))))
+			require.GreaterOrEqual(t, h.Evicted(), prev, "Evicted must never move backwards")
+			prev = h.Evicted()
+			require.LessOrEqual(t, h.TrackedKeys(), maxKeys)
+			require.EqualValues(t, i+1, int(h.Evicted())+h.TrackedKeys(),
+				"every distinct key is either still tracked or counted as evicted")
+		}
+		require.Positive(t, h.Evicted())
+		require.Equal(t, distinct, sink.count())
+	})
+}
+
+// ---------------------------------------------------------------------------
 // counters
 // ---------------------------------------------------------------------------
 

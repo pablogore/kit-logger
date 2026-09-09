@@ -301,12 +301,30 @@ func (h *SamplingHandler) allow(ctx context.Context, record slog.Record) bool {
 	return true
 }
 
+// evictionTarget is how many entries a forced eviction pass must leave behind.
+//
+// The caller inserts one key immediately after the pass, so the pass has to
+// leave a free slot: a target equal to maxKeys frees nothing and the insert
+// then pushes the map to maxKeys+1, breaking the bound TrackedKeys documents.
+// Reclaiming a quarter is what amortises the O(n) pass over maxKeys/4
+// insertions, but integer division makes that quarter zero for maxKeys <= 3,
+// so the floor of one is what guarantees progress at every bound. For maxKeys
+// of 1 the only correct target is zero -- there is no survivor to keep -- which
+// evictLocked handles before it computes any cutoff.
+func evictionTarget(maxKeys int) int {
+	return maxKeys - max(1, maxKeys/4)
+}
+
 // evictLocked makes room for new keys when the map is at capacity.
 //
 // It first drops entries that can no longer suppress anything, then falls back
 // to dropping the oldest quarter in a single pass, so the O(n) cost is
 // amortised over maxKeys/4 insertions instead of being paid on every one. It
 // never starts a goroutine.
+//
+// Every return path reports the same quantity -- how many entries this pass
+// actually removed -- so Evicted stays an exact count of reclaimed keys rather
+// than an estimate of how often the pass ran.
 func (s *samplingState) evictLocked(now time.Time, interval time.Duration) {
 	if len(s.last) < s.maxKeys {
 		return
@@ -323,10 +341,18 @@ func (s *samplingState) evictLocked(now time.Time, interval time.Duration) {
 		return
 	}
 
-	// Keep the newest three quarters.
-	target := s.maxKeys - s.maxKeys/4
-	if target < 1 {
-		target = 1
+	// Keep the newest three quarters, but never all of them.
+	target := evictionTarget(s.maxKeys)
+
+	// A target of zero has no survivor to sort against, and asking for the
+	// cutoff anyway would index one past the end of the buffer and panic on
+	// the logging path. Wiping the map is the same rule taken to its limit, so
+	// it is answered here rather than clamped into a target that keeps a key
+	// the bound has no room for.
+	if target == 0 {
+		clear(s.last)
+		s.evicted.Add(uint64(before))
+		return
 	}
 
 	s.evictBuf = s.evictBuf[:0]
