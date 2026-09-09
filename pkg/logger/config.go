@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -41,10 +42,24 @@ func WithCounterHook(hook CounterHook) Option {
 
 // SamplingConfig controls the frequency and probability of logs.
 type SamplingConfig struct {
-	Enabled     bool
-	Interval    time.Duration
-	MinLevel    string
+	Enabled  bool
+	Interval time.Duration
+	MinLevel string
+
+	// Probability is the chance in [0,1] that a record passes the probability
+	// gate. Zero means "unset" and is treated as 1 (emit everything): a
+	// sampler that discards every record is indistinguishable from a
+	// misconfiguration, so this fails toward emitting. Use Enabled=false to
+	// turn sampling off.
 	Probability float64
+
+	// KeyFunc derives the sampling key. Defaults to level plus message, so
+	// distinct events never suppress each other.
+	KeyFunc handler.SamplingKeyFunc
+
+	// MaxKeys bounds how many distinct sampling keys are tracked. Defaults to
+	// handler.DefaultSamplingMaxKeys.
+	MaxKeys int
 }
 
 // SetGlobal sets the global logger.
@@ -87,11 +102,20 @@ func New(cfg Config, opts ...Option) Logger {
 		h = handler.NewComponentHandler(h)
 
 		if cfg.Sampling.Enabled {
-			h = handler.NewSamplingHandler(h, handler.SamplingConfig{
+			sampler, err := handler.NewSamplingHandlerWithError(h, handler.SamplingConfig{
 				Interval:    cfg.Sampling.Interval,
 				Probability: cfg.Sampling.Probability,
 				MinLevel:    parseLevel(cfg.Sampling.MinLevel),
+				KeyFunc:     cfg.Sampling.KeyFunc,
+				MaxKeys:     cfg.Sampling.MaxKeys,
 			})
+			if err != nil {
+				// Report loudly rather than silently reinterpreting the
+				// configuration. The handler is still usable: invalid values
+				// were clamped to emitting defaults, so no record is lost.
+				fmt.Fprintf(os.Stderr, "kit-logger: invalid sampling configuration, using emitting defaults: %v\n", err)
+			}
+			h = sampler
 		}
 
 		h = handler.NewPrometheusHandler(h)
