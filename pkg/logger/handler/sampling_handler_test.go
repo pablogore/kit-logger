@@ -906,3 +906,164 @@ func (samDisabledSink) Enabled(context.Context, slog.Level) bool  { return false
 func (samDisabledSink) Handle(context.Context, slog.Record) error { return nil }
 func (s samDisabledSink) WithAttrs([]slog.Attr) slog.Handler      { return s }
 func (s samDisabledSink) WithGroup(string) slog.Handler           { return s }
+
+// ---------------------------------------------------------------------------
+// public contracts: Rand concurrency, MaxKeys fallback policy, Probability 0
+// ---------------------------------------------------------------------------
+
+// TestSamplingHandler_RandIsCalledOutsideTheLockAndMayRunConcurrently proves the
+// documented contract on SamplingConfig.Rand: it runs outside the sampler's
+// lock and must therefore be safe for concurrent use.
+//
+// The proof is structural rather than statistical. Rand blocks until every
+// goroutine is inside it at once; if the sampler serialised the call, only one
+// goroutine could ever be in there, the gate would never open and the wait
+// would hit its deadline.
+func TestSamplingHandler_RandIsCalledOutsideTheLockAndMayRunConcurrently(t *testing.T) {
+	const parallel = 4
+
+	var inFlight, maxInFlight atomic.Int64
+	var gateOnce sync.Once
+	gate := make(chan struct{})
+
+	randFn := func() float64 {
+		n := inFlight.Add(1)
+		for {
+			m := maxInFlight.Load()
+			if n <= m || maxInFlight.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		if n >= parallel {
+			gateOnce.Do(func() { close(gate) })
+		}
+		select {
+		case <-gate:
+		// Generous for a rendezvous of four goroutines, small enough that a
+		// genuine regression fails fast instead of stalling the suite.
+		case <-time.After(2 * time.Second):
+		}
+		inFlight.Add(-1)
+		return 0 // 0 < Probability, so the record passes the gate.
+	}
+
+	sink := &samSink{}
+	h := handler.NewSamplingHandler(sink, handler.SamplingConfig{
+		// A non-zero Interval puts the sampler's lock genuinely in play, so
+		// this proves Rand runs outside *that* lock rather than merely on the
+		// lock-free Interval==0 path.
+		Interval:    time.Hour,
+		MinLevel:    slog.LevelInfo,
+		Probability: 0.5,
+		Rand:        randFn,
+	})
+
+	ctx := context.Background()
+	var handleErr atomic.Value
+	var wg sync.WaitGroup
+	for i := 0; i < parallel; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := h.Handle(ctx, samRecord(slog.LevelInfo, fmt.Sprintf("m%d", i))); err != nil {
+				handleErr.Store(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if err := handleErr.Load(); err != nil {
+		require.NoError(t, err.(error))
+	}
+
+	select {
+	case <-gate:
+	default:
+		t.Fatalf("Rand was never entered by %d goroutines at once (max observed %d): "+
+			"it appears to be serialised, which contradicts its documented contract",
+			parallel, maxInFlight.Load())
+	}
+	require.EqualValues(t, parallel, maxInFlight.Load(),
+		"every goroutine must be able to sit inside Rand simultaneously")
+	require.Equal(t, parallel, sink.count(),
+		"each record drew 0 from Rand, so each must have passed the gate")
+}
+
+// TestSamplingHandler_InvalidMaxKeysFallsBackToBoundedResourceDefault pins the
+// policy that MaxKeys does NOT follow "fail toward emitting".
+//
+// Interval and Probability govern emission, so an invalid value there resolves
+// to whatever emits. MaxKeys governs memory, so an invalid value there resolves
+// to a bounded resource default instead. The two policies are deliberately
+// different, and this test is what stops them being unified by mistake.
+func TestSamplingHandler_InvalidMaxKeysFallsBackToBoundedResourceDefault(t *testing.T) {
+	cfg := handler.SamplingConfig{
+		Interval: time.Hour, // long enough that nothing is reclaimed as stale
+		MinLevel: slog.LevelInfo,
+		MaxKeys:  -1,
+	}
+
+	require.Error(t, cfg.Validate(), "a negative MaxKeys must be reported as invalid")
+
+	withErr, err := handler.NewSamplingHandlerWithError(&samSink{}, cfg)
+	require.Error(t, err, "the error-returning constructor must surface it")
+	require.Contains(t, err.Error(), "MaxKeys")
+	require.NotNil(t, withErr, "the handler must stay usable so no record is lost")
+
+	// The silent constructor applies the very same default without reporting it.
+	sink := &samSink{}
+	h := handler.NewSamplingHandler(sink, cfg)
+
+	ctx := context.Background()
+	const distinct = handler.DefaultSamplingMaxKeys * 2
+	for i := 0; i < distinct; i++ {
+		require.NoError(t, h.Handle(ctx, samRecord(slog.LevelInfo, fmt.Sprintf("m%d", i))))
+	}
+
+	// Emission is untouched by the substitution: every key is a first sighting,
+	// so every record is delivered. This is the half that makes the fallback a
+	// resource policy rather than an emission policy.
+	require.Equal(t, distinct, sink.count(),
+		"a MaxKeys fallback must never suppress a record; it only bounds state")
+
+	tracked := h.TrackedKeys()
+	require.LessOrEqual(t, tracked, handler.DefaultSamplingMaxKeys,
+		"tracked keys must stay within the substituted bound")
+	require.Greater(t, tracked, handler.DefaultSamplingMaxKeys/2,
+		"the fallback must be DefaultSamplingMaxKeys, not some arbitrarily small bound")
+	require.Positive(t, h.Evicted(), "exceeding the bound must evict")
+}
+
+// TestSamplingHandler_ZeroProbabilityIsProbabilityOneNotABypassedGate freezes
+// the intentional behaviour change so nobody "corrects" it later as a maths
+// bug: SamplingConfig{Probability: 0} means unset, and resolves to 1.0.
+//
+// Dropping every record is not a useful sampler configuration; turning
+// sampling off is what logger.Config's Enabled=false is for.
+func TestSamplingHandler_ZeroProbabilityIsProbabilityOneNotABypassedGate(t *testing.T) {
+	var randCalls atomic.Int64
+	sink := &samSink{}
+	h := handler.NewSamplingHandler(sink, handler.SamplingConfig{
+		MinLevel:    slog.LevelInfo,
+		Probability: 0,
+		Rand: func() float64 {
+			randCalls.Add(1)
+			return 0.999999 // would fail any gate strictly below 1.0
+		},
+	})
+
+	ctx := context.Background()
+	for i := 0; i < 100; i++ {
+		require.NoError(t, h.Handle(ctx, samRecord(slog.LevelInfo, fmt.Sprintf("m%d", i))))
+	}
+
+	require.Equal(t, 100, sink.count(),
+		"Probability 0 must resolve to 1.0 and emit everything")
+	require.Zero(t, h.Suppressed())
+
+	// At a resolved probability of 1.0 the gate short-circuits and Rand is
+	// never consulted. That is what separates "resolved to 1.0" from "gate
+	// happened to pass with some other probability still stored".
+	require.Zero(t, randCalls.Load(),
+		"a resolved probability of 1.0 must short-circuit the gate without calling Rand")
+}

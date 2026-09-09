@@ -24,6 +24,12 @@ type SamplingKeyFunc func(ctx context.Context, record slog.Record) string
 // This is the useful default: it thins out a repeating event while leaving
 // distinct events independent, so a "database timeout" warning cannot silence
 // an unrelated "cache unavailable" warning.
+//
+// It is exported so callers can compose or inspect that identity. A nil
+// KeyFunc does not call it: the handler then uses an allocation-free internal
+// representation of the same (level, message) identity, which is equivalent in
+// meaning but not in cost. Setting KeyFunc to DefaultSamplingKey is therefore
+// the slower way to ask for the default.
 func DefaultSamplingKey(_ context.Context, record slog.Record) string {
 	return record.Level.String() + "\x00" + record.Message
 }
@@ -59,13 +65,28 @@ type SamplingConfig struct {
 	// logger.
 	Now func() time.Time
 
-	// Rand returns a pseudo-random value in [0,1). Defaults to math/rand/v2.
-	// It is called while the sampler's lock is held, so it must be cheap, must
-	// not block and must not re-enter the logger.
+	// Rand returns a pseudo-random value in [0,1). Defaults to
+	// math/rand/v2.Float64.
+	//
+	// Unlike Now, it is called *outside* the sampler's lock -- the probability
+	// gate deliberately runs before any state is touched -- so it may be called
+	// concurrently from many goroutines and must be safe for concurrent use. It
+	// must also be cheap, must not block and must not re-enter the logger.
 	Rand func() float64
 
 	// MaxKeys bounds the number of tracked sampling keys. Defaults to
 	// DefaultSamplingMaxKeys. Must not be negative.
+	//
+	// Its invalid-value policy is deliberately *not* the one Interval and
+	// Probability follow. Those two govern emission, so they fail toward
+	// emitting: a misconfiguration must never silence a service. MaxKeys
+	// governs memory instead, so it fails toward a bounded safe resource
+	// default: any non-positive value -- zero meaning unset, negative meaning
+	// invalid -- becomes DefaultSamplingMaxKeys. That substitution changes only
+	// how many distinct keys are remembered, never which records are emitted.
+	//
+	// Validate still reports a negative MaxKeys, so NewSamplingHandlerWithError
+	// surfaces it while NewSamplingHandler applies the default silently.
 	MaxKeys int
 }
 
@@ -132,9 +153,17 @@ type SamplingHandler struct {
 
 // NewSamplingHandler creates a handler with frequency and probability control.
 //
-// Invalid values in cfg are clamped to safe, emitting defaults. Use
-// NewSamplingHandlerWithError, or SamplingConfig.Validate, to detect them
-// instead.
+// Invalid values in cfg are replaced by safe defaults under two distinct
+// policies, because the fields govern different things:
+//
+//   - Interval and Probability govern emission and fail toward emitting, so a
+//     misconfiguration can never silence a service.
+//   - MaxKeys governs memory and falls back to the bounded
+//     DefaultSamplingMaxKeys. This is a resource default, not an emitting one;
+//     it changes how many keys are tracked, never which records are emitted.
+//
+// Use NewSamplingHandlerWithError, or SamplingConfig.Validate, to detect
+// invalid values instead of having them replaced.
 func NewSamplingHandler(next slog.Handler, cfg SamplingConfig) *SamplingHandler {
 	h, _ := newSamplingHandler(next, cfg)
 	return h
@@ -160,6 +189,9 @@ func newSamplingHandler(next slog.Handler, cfg SamplingConfig) (*SamplingHandler
 		// Zero is "unset"; out-of-range is invalid. Both fail toward emitting.
 		probability = 1
 	}
+	// Not an emitting default: MaxKeys bounds memory, not emission. Zero is
+	// unset and negative is invalid, and both fall back to the same bounded
+	// value -- Validate is what tells the two apart for a caller who asks.
 	maxKeys := cfg.MaxKeys
 	if maxKeys <= 0 {
 		maxKeys = DefaultSamplingMaxKeys
