@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -49,6 +50,10 @@ type Config struct {
 	// process-wide extractor, so it needs no synchronization and is unaffected
 	// by another part of the process calling SetContextFieldExtractor.
 	ContextFields ContextFieldExtractorFunc
+
+	// Writer is the destination for the default text/JSON handler.
+	// Defaults to stdout. Ignored when Handler is set.
+	Writer io.Writer
 }
 
 // Option configures New (e.g. WithCounterHook).
@@ -180,10 +185,15 @@ func New(cfg Config, opts ...Option) Logger {
 		// lifecycle-bearing handlers have to be discovered.
 		lifecycleHandlers = collectFlushers(h)
 	} else {
+		w := cfg.Writer
+		if w == nil {
+			w = os.Stdout
+		}
+
 		if cfg.Format == "json" {
-			h = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: levelVar})
+			h = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: levelVar})
 		} else {
-			h = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: levelVar})
+			h = slog.NewTextHandler(w, &slog.HandlerOptions{Level: levelVar})
 		}
 
 		if len(cfg.FilterRules) > 0 {

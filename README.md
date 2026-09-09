@@ -34,6 +34,20 @@ func main() {
 }
 ```
 
+## Destination
+
+By default the logger writes to stdout. Set `Config.Writer` to send output anywhere else — `os.Stderr`, a file, an `io.Writer` used in tests, or a third-party writer such as [`lumberjack`](https://github.com/natefinch/lumberjack) for rotating files:
+
+```go
+log := logger.New(logger.Config{
+    Level:  "info",
+    Format: "json",
+    Writer: os.Stderr, // keeps stdout free for a CLI's own machine-readable output
+})
+```
+
+`Writer` composes with the rest of `Config` (`GlobalFields`, `FilterRules`, `Sampling`, `BufferSize`, `Hook`, `ContextFields`) — it only changes where the pipeline's output lands. It is ignored when `Config.Handler` is set.
+
 ## Lifecycle
 
 Buffered logging is asynchronous, so a process that exits without draining loses
