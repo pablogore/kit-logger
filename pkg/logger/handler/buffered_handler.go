@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Errors returned by BufferedHandler.
@@ -175,49 +176,105 @@ func (h *BufferedHandler) WithGroup(name string) slog.Handler {
 	return &BufferedHandler{core: h.core, next: h.next.WithGroup(name)}
 }
 
+// flushEnqueueSlice bounds how long Flush holds the read lock while trying to
+// enqueue its barrier. Without a bound, a full queue behind a hung wrapped
+// handler would let a deadline-less Flush hold the read lock indefinitely and
+// starve Shutdown of the write lock, so Shutdown could not even set the state
+// and would stop honouring its own context.
+const flushEnqueueSlice = 500 * time.Microsecond
+
 // Flush returns once every record accepted before the call has been delivered
 // to the wrapped handler, or ctx expires.
 //
 // It does not stop the handler: records may be accepted again afterwards.
 //
 // Flush returns the first downstream error observed since the previous Flush or
-// Shutdown, if any; that error is reported once and then cleared. Use
-// HandlerErrors for a count that is never cleared. It returns ctx.Err() on
-// timeout and ErrShutdown if the handler is shutting down or stopped.
+// Shutdown, if any. That error is reported to exactly one caller and then
+// cleared, so concurrent Flush callers do not each receive a copy of the same
+// failure; use HandlerErrors for a monotonic count that is never cleared. It
+// returns ctx.Err() on timeout and ErrShutdown if the handler is shutting down
+// or stopped.
 func (h *BufferedHandler) Flush(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	c := h.core
+	barrier := make(chan struct{})
+
+	for {
+		enqueued, err := c.tryEnqueueBarrier(ctx, barrier)
+		if err != nil {
+			return err
+		}
+		if enqueued {
+			return c.awaitBarrier(ctx, barrier)
+		}
+		// The read lock has been released, so Shutdown can make progress.
+		// Re-check the lifecycle before trying again.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.workerDone:
+			return ErrShutdown
+		default:
+		}
+	}
+}
+
+// tryEnqueueBarrier enqueues the flush barrier while holding the read lock and
+// while the core is still running.
+//
+// That is the same handshake Handle uses, and it is what makes the drain's
+// "queue is empty" test final: Shutdown cannot complete its transition out of
+// stateRunning while this read lock is held, so a barrier that is accepted is
+// always in the queue before the drain begins. Releasing the lock between the
+// state check and the send would allow a barrier to land after the drain
+// already found the queue empty, leaving it unprocessed.
+//
+// It reports (true, nil) when the barrier is queued, (false, nil) when the
+// caller should retry with the lock released, and (false, err) when the flush
+// is over.
+func (c *bufferedCore) tryEnqueueBarrier(ctx context.Context, barrier chan struct{}) (bool, error) {
+	timer := time.NewTimer(flushEnqueueSlice)
+	defer timer.Stop()
 
 	c.mu.RLock()
-	stopped := c.state != stateRunning
-	c.mu.RUnlock()
-	if stopped {
-		return ErrShutdown
+	defer c.mu.RUnlock()
+
+	if c.state != stateRunning {
+		return false, ErrShutdown
 	}
 
-	// A barrier must get into the queue even when the queue is momentarily
-	// full, so this send blocks — bounded by ctx and by the worker's lifetime.
-	// The queue is never closed, so a blocking send here cannot panic.
-	barrier := make(chan struct{})
 	select {
 	case c.queue <- bufferedItem{barrier: barrier}:
+		return true, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	case <-c.workerDone:
-		return ErrShutdown
+		return false, ErrShutdown
+	case <-timer.C:
+		return false, nil
 	}
+}
 
-	// The queue is FIFO and there is exactly one worker, so the barrier is
-	// closed only after every earlier item has returned from next.Handle.
+// awaitBarrier waits for the worker to reach the flush checkpoint. The queue is
+// FIFO and there is exactly one worker, so the barrier is closed only after
+// every earlier item has returned from the wrapped handler.
+func (c *bufferedCore) awaitBarrier(ctx context.Context, barrier chan struct{}) error {
 	select {
 	case <-barrier:
 		return c.takeErr()
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.workerDone:
-		return ErrShutdown
+		// The worker exited. If the drain closed our barrier on its way out,
+		// prefer that: the flush did complete.
+		select {
+		case <-barrier:
+			return c.takeErr()
+		default:
+			return ErrShutdown
+		}
 	}
 }
 
@@ -259,6 +316,11 @@ func (h *BufferedHandler) Dropped() uint64 { return h.core.dropped.Load() }
 // Rejected is the number of records rejected because the handler was shutting
 // down or stopped.
 func (h *BufferedHandler) Rejected() uint64 { return h.core.rejected.Load() }
+
+// Queued is the number of items still waiting in the buffer. After Shutdown
+// returns successfully it is always zero: every accepted record and every
+// accepted flush barrier has been processed.
+func (h *BufferedHandler) Queued() int { return len(h.core.queue) }
 
 // HandlerErrors is the total number of errors returned by the wrapped handler.
 // Unlike the error reported by Flush and Shutdown, this counter is never reset.

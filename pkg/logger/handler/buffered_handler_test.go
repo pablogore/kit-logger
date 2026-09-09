@@ -765,3 +765,213 @@ func TestBufferedHandler_WithGroup_EmptyGroup(t *testing.T) {
 	require.NoError(t, buffered.Flush(testCtx(t)))
 	require.Len(t, rec.snapshot(), 1)
 }
+
+// ---------------------------------------------------------------------------
+// Flush racing Shutdown (review of #20)
+// ---------------------------------------------------------------------------
+
+// A Flush that observed the running state must not be able to enqueue its
+// barrier after the drain already decided the queue was empty. Enqueuing the
+// barrier participates in the same read-lock handshake as Handle, so the only
+// two admissible outcomes are:
+//
+//   - the barrier was accepted while running: Flush waits for its checkpoint
+//     and reports nil or the downstream error;
+//   - Shutdown won: Flush reports ErrShutdown.
+//
+// Never a hang, never a panic, never an unprocessed barrier.
+func TestBufferedHandler_FlushConcurrentWithShutdown(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		func() {
+			rec := newRecorder().withDelay(50 * time.Microsecond)
+			buffered := handler.NewBufferedHandler(rec, 8)
+
+			// Keep the worker busy so the queue is genuinely in play.
+			for j := 0; j < 8; j++ {
+				_ = buffered.Handle(context.Background(), newRecord("m"))
+			}
+
+			var flushErr error
+			var wg sync.WaitGroup
+			wg.Add(2)
+			start := make(chan struct{})
+
+			go func() {
+				defer wg.Done()
+				<-start
+				flushErr = buffered.Flush(ctxWithTimeout(t, 5*time.Second))
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				_ = buffered.Shutdown(ctxWithTimeout(t, 5*time.Second))
+			}()
+
+			close(start)
+			wg.Wait()
+
+			switch {
+			case flushErr == nil:
+				// The barrier was processed: everything accepted before the
+				// Flush must have been delivered.
+				require.Equal(t, 8, rec.len(),
+					"iteration %d: Flush returned nil but records were not delivered", i)
+			case errors.Is(flushErr, handler.ErrShutdown):
+				// Shutdown won the race. Admissible.
+			default:
+				t.Fatalf("iteration %d: undefined Flush outcome: %v", i, flushErr)
+			}
+
+			// The observable invariant: nothing may be left behind. An
+			// orphaned barrier — one enqueued after the drain decided the
+			// queue was empty — shows up here.
+			require.Zero(t, buffered.Queued(),
+				"iteration %d: %d item(s) left unprocessed after Shutdown (orphaned flush barrier)",
+				i, buffered.Queued())
+		}()
+	}
+}
+
+// hungSink signals when the worker has entered Handle, then blocks until
+// released. It is the only way to construct a genuinely full queue: without
+// the signal the worker dequeues as soon as it is scheduled and frees a slot,
+// which makes a starvation test pass vacuously.
+type hungSink struct {
+	entered chan struct{}
+	once    sync.Once
+	release chan struct{}
+}
+
+func newHungSink() *hungSink {
+	return &hungSink{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (h *hungSink) Enabled(context.Context, slog.Level) bool { return true }
+func (h *hungSink) Handle(context.Context, slog.Record) error {
+	h.once.Do(func() { close(h.entered) })
+	<-h.release
+	return nil
+}
+func (h *hungSink) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *hungSink) WithGroup(string) slog.Handler      { return h }
+
+// Enqueuing the flush barrier must hold the read lock, but the hold must be
+// bounded. Holding it across an unbounded blocking send lets a hung wrapped
+// handler starve Shutdown of the write lock, so that Shutdown cannot even set
+// the state and stops honouring its own context.
+func TestBufferedHandler_ShutdownIsNotStarvedByBlockedFlush(t *testing.T) {
+	sink := newHungSink()
+	buffered := handler.NewBufferedHandler(sink, 2)
+	t.Cleanup(func() { close(sink.release) })
+
+	// Get the worker inside the hung sink, then fill the queue so it can
+	// never drain and the barrier send can never succeed.
+	require.NoError(t, buffered.Handle(context.Background(), newRecord("blocking")))
+	<-sink.entered
+	for buffered.Dropped() == 0 {
+		_ = buffered.Handle(context.Background(), newRecord("filler"))
+	}
+	require.Equal(t, 2, buffered.Queued(), "the queue must be full for this test to mean anything")
+
+	// A Flush with no deadline against a permanently full queue.
+	go func() { _ = buffered.Flush(context.Background()) }()
+	time.Sleep(100 * time.Millisecond) // let it reach the barrier send
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- buffered.Shutdown(ctx) }()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded,
+			"Shutdown must honour its own context even while a Flush is blocked")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown was starved: it could not acquire the write lock held by a blocked Flush")
+	}
+}
+
+// After Shutdown returns, nothing may be left in the queue. An orphaned flush
+// barrier — one enqueued after the drain decided the queue was empty — is the
+// observable symptom of releasing the read lock between the state check and
+// the barrier send. Measured at 0.03% of iterations before the fix.
+func TestBufferedHandler_ShutdownLeavesNothingQueued(t *testing.T) {
+	for i := 0; i < 20000; i++ {
+		rec := newRecorder()
+		buffered := handler.NewBufferedHandler(rec, 4)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		start := make(chan struct{})
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = buffered.Flush(ctxWithTimeout(t, 5*time.Second))
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = buffered.Shutdown(ctxWithTimeout(t, 5*time.Second))
+		}()
+		close(start)
+		wg.Wait()
+
+		require.Zero(t, buffered.Queued(),
+			"iteration %d: an item was left unprocessed after Shutdown (orphaned flush barrier)", i)
+	}
+}
+
+// The consume-once contract for downstream errors, pinned under concurrency:
+// exactly one of N concurrent Flush callers receives the error, the rest get
+// nil, and the monotonic counter is never consumed.
+func TestBufferedHandler_ConcurrentFlushReportsDownstreamErrorExactlyOnce(t *testing.T) {
+	downstreamErr := errors.New("sink unavailable")
+	rec := newRecorder().withErr(downstreamErr)
+	buffered := handler.NewBufferedHandler(rec, 16)
+	t.Cleanup(func() { _ = buffered.Shutdown(testCtx(t)) })
+
+	require.NoError(t, buffered.Handle(context.Background(), newRecord("m")))
+	// Make sure the record has been delivered (and failed) before flushing.
+	require.ErrorIs(t, buffered.Flush(testCtx(t)), downstreamErr)
+
+	// Now produce one more failure and race five Flush callers for it.
+	require.NoError(t, buffered.Handle(context.Background(), newRecord("m")))
+
+	const callers = 5
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = buffered.Flush(ctxWithTimeout(t, 5*time.Second))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	reported := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+		case errors.Is(err, downstreamErr):
+			reported++
+		default:
+			t.Fatalf("caller %d: unexpected error %v", i, err)
+		}
+	}
+	require.Equal(t, 1, reported,
+		"a downstream failure must be surfaced to exactly one Flush caller (consume-once)")
+	require.Equal(t, uint64(2), buffered.HandlerErrors(),
+		"the monotonic counter must count every failure and never be consumed")
+}
+
+func ctxWithTimeout(t *testing.T, d time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	t.Cleanup(cancel)
+	return ctx
+}
