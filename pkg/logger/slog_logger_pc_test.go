@@ -196,9 +196,9 @@ func facadeCalls() []facadeCall {
 // depth: every exported method must attribute to its own caller, never to the
 // facade or to an internal closure.
 func TestSlogLogger_AttributesTheConsumerCallSite(t *testing.T) {
-	restore := globalContextFieldExtractor
-	globalContextFieldExtractor = func(context.Context) []any { return []any{"tenant", "acme"} }
-	t.Cleanup(func() { globalContextFieldExtractor = restore })
+	restore := contextFieldExtractor()
+	SetContextFieldExtractor(func(context.Context) []any { return []any{"tenant", "acme"} })
+	t.Cleanup(func() { SetContextFieldExtractor(restore) })
 
 	for _, bufferSize := range []int{0, 1024} {
 		for _, tc := range facadeCalls() {

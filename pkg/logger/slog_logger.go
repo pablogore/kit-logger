@@ -26,6 +26,12 @@ type SlogLogger struct {
 	// decorators wrap it and no matter how the logger was derived. It is nil
 	// for a SlogLogger built by hand, which then has nothing to flush.
 	lifecycle *lifecycleGroup
+
+	// contextFields is this logger's own context extractor, set once at
+	// construction from Config.ContextFields and never written again. Being
+	// immutable is what makes WithContext race-free without a single atomic
+	// operation on the hot path.
+	contextFields ContextFieldExtractorFunc
 }
 
 // callerPCSkip is the runtime.Callers skip depth that lands on the caller of an
@@ -205,19 +211,29 @@ func (l *SlogLogger) emit(ctx context.Context, pc uintptr, level slog.Level, msg
 func (l *SlogLogger) With(args ...any) Logger {
 	filtered, _, _ := extractLogOptions(args)
 	return &SlogLogger{
-		logger:      l.logger.With(filtered...),
-		levelVar:    l.levelVar,
-		rateState:   l.rateState,
-		counterHook: l.counterHook,
-		lifecycle:   l.lifecycle,
+		logger:        l.logger.With(filtered...),
+		levelVar:      l.levelVar,
+		rateState:     l.rateState,
+		counterHook:   l.counterHook,
+		lifecycle:     l.lifecycle,
+		contextFields: l.contextFields,
 	}
 }
 
+// WithContext returns a logger carrying the fields extracted from ctx.
+//
+// A logger configured with Config.ContextFields uses its own extractor and
+// touches no package-level state at all. Only a logger without one falls back
+// to the deprecated process-wide extractor, and that read is atomic.
 func (l *SlogLogger) WithContext(ctx context.Context) Logger {
-	if globalContextFieldExtractor == nil {
+	extract := l.contextFields
+	if extract == nil {
+		extract = contextFieldExtractor()
+	}
+	if extract == nil {
 		return l
 	}
-	return l.With(globalContextFieldExtractor(ctx)...)
+	return l.With(extract(ctx)...)
 }
 
 func (l *SlogLogger) SetLevel(level slog.Level) {

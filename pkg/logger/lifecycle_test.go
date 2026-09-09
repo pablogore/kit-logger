@@ -238,10 +238,10 @@ func TestExitWithFlush_DrainsBeforeExiting(t *testing.T) {
 	rec := &lifecycleRecorder{delay: 5 * time.Millisecond}
 	log, _ := newBufferedLogger(t, rec, 64)
 
-	previousLogger := defaultLogger
+	previousLogger := peekGlobalForTest()
 	previousExit := exitFunc
 	t.Cleanup(func() {
-		defaultLogger = previousLogger
+		restoreGlobalForTest(previousLogger)
 		exitFunc = previousExit
 	})
 

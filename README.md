@@ -81,6 +81,45 @@ logger was derived through `With`. A chain assembled by hand and passed as
 `Config.Handler` is discovered through the `Unwrap` / `UnwrapAll` methods the
 built-in handlers implement.
 
+## Globals and context fields
+
+Prefer owning a logger and passing it where it is needed. The package-level
+helpers remain for consumers that cannot do that yet, and they are now
+race-free: `L()` and `SetGlobal()` publish through an `atomic.Pointer`, and the
+lazy default is constructed exactly once no matter how many goroutines call
+`L()` first.
+
+```go
+log := logger.New(logger.Config{Level: "info", Format: "json"})
+logger.SetGlobal(log)          // safe concurrently with L(), even under load
+```
+
+- `SetGlobal(l)` **no longer calls `slog.SetDefault`.** Rewiring the standard
+  library for the whole process is not something this library should do as a
+  side effect of setting its own global. Use `SetGlobalAndSlogDefault(l)` when
+  installing the `slog` default is what you actually want.
+- `SetGlobal(nil)` panics. Storing a nil logger would turn every later `L()`
+  into a nil dereference far away from the mistake.
+- `L()` constructs a default logger on first use, exactly once.
+
+Context fields belong on the logger, not on the package:
+
+```go
+log := logger.New(logger.Config{
+    ContextFields: func(ctx context.Context) []any {
+        return []any{"request_id", requestIDFrom(ctx)}
+    },
+})
+
+log.WithContext(ctx).Info("handling request")   // carries request_id
+```
+
+A logger configured this way reads its own immutable field, so `WithContext`
+touches no package-level state at all and is unaffected by another part of the
+process calling `SetContextFieldExtractor`. That function still works as a
+process-wide fallback for loggers without their own extractor, and is now
+deprecated.
+
 ## Tests
 
 The framework maintains over 85% test coverage on handlers, middleware, and testing utilities.
