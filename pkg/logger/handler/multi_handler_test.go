@@ -2,8 +2,11 @@ package handler_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/pablogore/kit-logger/pkg/logger/handler"
 	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
@@ -339,6 +342,92 @@ func TestMultiHandler_WithGroup_ContextLogging(t *testing.T) {
 	assert.Equal(t, "abc123", groupAttr(t, attrs2, "session", "session_id"))
 }
 
+func TestMultiHandler_Handle_SkipsChildrenNotEnabledForRecordLevel(t *testing.T) {
+	handler1 := &multiTestLevelHandler{level: slog.LevelDebug} // enabled for everything below
+	handler2 := &multiTestLevelHandler{level: slog.LevelError} // only enabled for Error+
+
+	multi := handler.NewMultiHandler(handler1, handler2)
+
+	logger := slog.New(multi)
+	logger.Info("info record")
+	logger.Error("error record")
+
+	// handler1 is enabled for both Info and Error; handler2 only for Error.
+	assert.Equal(t, 2, handler1.calls, "handler1 should receive every record it is enabled for")
+	assert.Equal(t, 1, handler2.calls, "handler2 should only receive the record it is enabled for")
+}
+
+func TestMultiHandler_Handle_JoinsAllChildErrors(t *testing.T) {
+	err0 := errors.New("child 0 failed")
+	err2 := errors.New("child 2 failed")
+
+	handler0 := &errorHandler{shouldError: true, err: err0}
+	handler1 := kitlogtest.NewTestHandler(func(context.Context, slog.Record) {})
+	handler2 := &errorHandler{shouldError: true, err: err2}
+
+	multi := handler.NewMultiHandler(handler0, handler1, handler2)
+
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "test", 0)
+	err := multi.Handle(context.Background(), record)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, err0, "the joined error should still satisfy errors.Is for child 0's error")
+	assert.ErrorIs(t, err, err2, "the joined error should still satisfy errors.Is for child 2's error")
+	assert.Contains(t, err.Error(), "child 0", "the error should name which child failed")
+	assert.Contains(t, err.Error(), "child 2", "the error should name which child failed")
+}
+
+func TestMultiHandler_Handle_InvocationOrder(t *testing.T) {
+	var order []int
+
+	makeHandler := func(i int) slog.Handler {
+		return kitlogtest.NewTestHandler(func(context.Context, slog.Record) {
+			order = append(order, i)
+		})
+	}
+
+	multi := handler.NewMultiHandler(makeHandler(0), makeHandler(1), makeHandler(2))
+
+	logger := slog.New(multi)
+	logger.Info("order test")
+
+	assert.Equal(t, []int{0, 1, 2}, order, "children must be invoked in construction order")
+}
+
+func TestMultiHandler_Handle_ChildMutationDoesNotLeakToSiblings(t *testing.T) {
+	// A record needs enough overflow attrs for its unexported back slice to
+	// carry spare capacity beyond its length; log/slog reserves only 5 attrs
+	// inline (front) before spilling into back. Adding these one at a time
+	// mirrors a real pipeline where several handlers each call AddAttrs in
+	// turn, which is exactly the pattern that leaves spare capacity behind.
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "mutation isolation test", 0)
+	for i := 0; i < 8; i++ {
+		record.AddAttrs(slog.Int(fmt.Sprintf("k%d", i), i))
+	}
+
+	mutating1 := &mutatingHandler{attrKey: "mutated_by_child_0"}
+	mutating2 := &mutatingHandler{attrKey: "mutated_by_child_1"}
+
+	// Both children call Record.AddAttrs, the same way ComponentHandler and
+	// other real handlers do. Without a per-child Clone, they would share the
+	// record's back backing array: with spare capacity available, the second
+	// child's AddAttrs call would write into the same slot the first child
+	// just wrote, and log/slog's own runtime detects exactly that aliasing by
+	// splicing in a "!BUG" sentinel attr rather than silently corrupting the
+	// data — so its presence proves the leak.
+	multi := handler.NewMultiHandler(mutating1, mutating2)
+
+	err := multi.Handle(context.Background(), record)
+	require.NoError(t, err)
+
+	for _, attrs := range [][]slog.Attr{mutating1.observed, mutating2.observed} {
+		for _, a := range attrs {
+			assert.NotEqual(t, "!BUG", a.Key,
+				"child received a Record aliased with a sibling's: %v", a.Value)
+		}
+	}
+}
+
 // groupAttr looks up a key inside a nested slog group captured by
 // utils.ExtractAttrs, whose map values are the raw []slog.Attr of the group.
 func groupAttr(t *testing.T, attrs map[string]interface{}, groupKey, attrKey string) any {
@@ -356,9 +445,11 @@ func groupAttr(t *testing.T, attrs map[string]interface{}, groupKey, attrKey str
 	return nil
 }
 
-// multiTestLevelHandler is a simple handler that filters by level
+// multiTestLevelHandler is a simple handler that filters by level and counts
+// how many times Handle was actually invoked.
 type multiTestLevelHandler struct {
 	level slog.Level
+	calls int
 }
 
 func (h *multiTestLevelHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -366,6 +457,7 @@ func (h *multiTestLevelHandler) Enabled(ctx context.Context, level slog.Level) b
 }
 
 func (h *multiTestLevelHandler) Handle(ctx context.Context, r slog.Record) error {
+	h.calls++
 	return nil
 }
 
@@ -377,9 +469,11 @@ func (h *multiTestLevelHandler) WithGroup(name string) slog.Handler {
 	return h
 }
 
-// errorHandler is a handler that returns an error
+// errorHandler is a handler that returns err (or assert.AnError if err is nil)
+// whenever shouldError is set.
 type errorHandler struct {
 	shouldError bool
+	err         error
 }
 
 func (h *errorHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -387,10 +481,13 @@ func (h *errorHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *errorHandler) Handle(ctx context.Context, r slog.Record) error {
-	if h.shouldError {
-		return assert.AnError
+	if !h.shouldError {
+		return nil
 	}
-	return nil
+	if h.err != nil {
+		return h.err
+	}
+	return assert.AnError
 }
 
 func (h *errorHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
@@ -400,3 +497,26 @@ func (h *errorHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 func (h *errorHandler) WithGroup(name string) slog.Handler {
 	return h
 }
+
+// mutatingHandler calls Record.AddAttrs on the record it receives, the same
+// way ComponentHandler and other real handlers do, and records every attr it
+// observed afterwards so a test can check for log/slog's own "!BUG" aliasing
+// sentinel (see Record.AddAttrs) surfacing from a sibling's mutation.
+type mutatingHandler struct {
+	attrKey  string
+	observed []slog.Attr
+}
+
+func (h *mutatingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *mutatingHandler) Handle(_ context.Context, r slog.Record) error {
+	r.AddAttrs(slog.Bool(h.attrKey, true))
+	r.Attrs(func(a slog.Attr) bool {
+		h.observed = append(h.observed, a)
+		return true
+	})
+	return nil
+}
+
+func (h *mutatingHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+func (h *mutatingHandler) WithGroup(name string) slog.Handler       { return h }
