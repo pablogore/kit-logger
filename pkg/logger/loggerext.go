@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"context"
 	"os"
 	"sync"
 )
@@ -8,11 +9,23 @@ import (
 // exitFunc is a variable that can be replaced for testing
 var exitFunc = os.Exit
 
-// ExitWithFlush terminates the program with the specified exit code after flushing the logger.
+// ExitWithFlush shuts the global logger down and then terminates the program
+// with the specified exit code.
+//
+// The drain is bounded by DefaultShutdownTimeout: a process on its way out must
+// not hang on a stuck downstream handler. A logger that does not implement
+// ManagedLogger falls back to Sync.
 func ExitWithFlush(code int) {
-	if flusher, ok := L().(interface{ Sync() error }); ok {
-		_ = flusher.Sync()
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultShutdownTimeout)
+	defer cancel()
+
+	log := L()
+	if managed, ok := log.(ManagedLogger); ok {
+		_ = managed.Shutdown(ctx)
+	} else {
+		_ = log.Sync()
 	}
+
 	exitFunc(code)
 }
 

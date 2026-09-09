@@ -57,3 +57,8 @@ func (h *PrometheusHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 func (h *PrometheusHandler) WithGroup(name string) slog.Handler {
 	return &PrometheusHandler{next: h.next.WithGroup(name)}
 }
+
+// Unwrap returns the handler this one decorates. It lets a logger lifecycle
+// (Flush, Shutdown) traverse a chain that was assembled by hand, instead of
+// stopping at the outermost handler.
+func (h *PrometheusHandler) Unwrap() slog.Handler { return h.next }

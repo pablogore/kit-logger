@@ -34,6 +34,53 @@ func main() {
 }
 ```
 
+## Lifecycle
+
+Buffered logging is asynchronous, so a process that exits without draining loses
+its in-flight tail — exactly the window where the interesting records live. The
+lifecycle is therefore host-owned and explicit.
+
+`Logger` is unchanged. Type-assert to `ManagedLogger` to reach it:
+
+```go
+log := logger.New(logger.Config{BufferSize: 4096, Format: "json"})
+logger.SetGlobal(log)
+
+if managed, ok := log.(logger.ManagedLogger); ok {
+    defer func() {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        _ = managed.Shutdown(ctx)
+    }()
+}
+```
+
+- `Flush(ctx)` returns once every record accepted before the call has been
+  delivered downstream, or `ctx` expires — in which case it returns `ctx.Err()`.
+  It does not stop the logger.
+- `Shutdown(ctx)` stops accepting records, delivers what it already accepted and
+  releases the worker. It is idempotent and safe to call concurrently: the
+  shutdown is started once and shared, and `ctx` bounds how long *that call*
+  waits for it — not how long the drain is allowed to take. A caller with a
+  tight deadline gets its own `ctx.Err()` and cannot cut short a drain another
+  caller was willing to wait for; every caller that waits to the end sees the
+  same result.
+- Admission closes the moment `Shutdown` starts, not when it finishes. Records
+  submitted from that point on are discarded before they consume a rate-limit
+  token or fire a counter; they never panic and never block, and they are
+  counted by `(*SlogLogger).Rejected()`.
+- `Sync()` is `Flush(context.Background())`. It stays on the `Logger` interface
+  for source compatibility and is deprecated in favour of the context-aware
+  methods.
+- `ExitWithFlush(code)` shuts the global logger down, bounded by
+  `DefaultShutdownTimeout`, before terminating the process.
+
+The lifecycle is captured when `New` assembles the pipeline, so it reaches the
+buffer regardless of how many decorators wrap it and regardless of whether the
+logger was derived through `With`. A chain assembled by hand and passed as
+`Config.Handler` is discovered through the `Unwrap` / `UnwrapAll` methods the
+built-in handlers implement.
+
 ## Tests
 
 The framework maintains over 85% test coverage on handlers, middleware, and testing utilities.

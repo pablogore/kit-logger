@@ -53,3 +53,10 @@ func (h *MultiHandler) WithGroup(name string) slog.Handler {
 	}
 	return NewMultiHandler(newHandlers...)
 }
+
+// UnwrapAll returns every handler this one fans out to. A MultiHandler wraps
+// more than one handler, so it cannot answer Unwrap with a single handler
+// without hiding the rest from lifecycle traversal.
+func (h *MultiHandler) UnwrapAll() []slog.Handler {
+	return append([]slog.Handler(nil), h.handlers...)
+}

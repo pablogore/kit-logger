@@ -260,14 +260,12 @@ func TestSlogLogger_Sync(t *testing.T) {
 }
 
 func TestSlogLogger_Sync_WithFlusher(t *testing.T) {
-	// Create a handler that implements Flush
+	// The lifecycle is captured when New assembles the pipeline, so the
+	// flushable handler has to be reached through New, not by assigning a
+	// handler to a hand-built SlogLogger.
 	flushHandler := &flushableHandler{}
-	logger := &SlogLogger{
-		logger:   slog.New(flushHandler),
-		levelVar: new(slog.LevelVar),
-	}
+	logger := New(Config{Handler: flushHandler})
 
-	// Test that Sync calls Flush
 	err := logger.Sync()
 	assert.NoError(t, err)
 	assert.True(t, flushHandler.flushed)
@@ -328,9 +326,10 @@ func TestSlogLogger_Integration(t *testing.T) {
 	assert.NotNil(t, slogLogger)
 }
 
-// Mock handler that implements Flush for testing
+// Mock handler that implements the Flusher lifecycle for testing
 type flushableHandler struct {
-	flushed bool
+	flushed  bool
+	shutdown bool
 }
 
 func (h *flushableHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -349,6 +348,12 @@ func (h *flushableHandler) WithGroup(name string) slog.Handler {
 	return h
 }
 
-func (h *flushableHandler) Flush() {
+func (h *flushableHandler) Flush(context.Context) error {
 	h.flushed = true
+	return nil
+}
+
+func (h *flushableHandler) Shutdown(context.Context) error {
+	h.shutdown = true
+	return nil
 }

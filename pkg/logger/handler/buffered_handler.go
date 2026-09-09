@@ -401,3 +401,8 @@ func (h *bufferedCore) takeErr() error {
 	h.firstErr = nil
 	return err
 }
+
+// Unwrap returns the handler this one decorates. It lets a logger lifecycle
+// (Flush, Shutdown) traverse a chain that was assembled by hand, instead of
+// stopping at the outermost handler.
+func (h *BufferedHandler) Unwrap() slog.Handler { return h.next }
