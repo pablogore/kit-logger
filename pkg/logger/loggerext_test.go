@@ -2,7 +2,7 @@ package logger
 
 import (
 	"os"
-	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -86,7 +86,7 @@ func TestExitWithFlush_DirectCall(t *testing.T) {
 func TestEnsureLoggerOnce_FirstCall(t *testing.T) {
 	// Reset global logger and sync.Once so this test sees the "first call" behavior
 	defaultLogger = nil
-	reflect.ValueOf(&once).Elem().Set(reflect.Zero(reflect.TypeOf(once)))
+	once = sync.Once{}
 
 	// Test first call
 	cfg := Config{Level: "debug", Format: "text"}
@@ -114,7 +114,7 @@ func TestEnsureLoggerOnce_SubsequentCalls(t *testing.T) {
 func TestEnsureLoggerOnce_MultipleCalls(t *testing.T) {
 	// Reset global logger and sync.Once so the first EnsureLoggerOnce runs
 	defaultLogger = nil
-	reflect.ValueOf(&once).Elem().Set(reflect.Zero(reflect.TypeOf(once)))
+	once = sync.Once{}
 
 	// Test multiple calls
 	cfg1 := Config{Level: "debug", Format: "text"}
