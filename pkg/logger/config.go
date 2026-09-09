@@ -41,6 +41,7 @@ type Config struct {
 	Hook         func(ctx context.Context, r slog.Record) (context.Context, bool)
 	Keys         []string
 	Level        string
+	RateLimit    RateLimitConfig
 	Sampling     SamplingConfig
 
 	// ContextFields extracts fields from a context for WithContext. A logger
@@ -62,6 +63,32 @@ func WithCounterHook(hook CounterHook) Option {
 	return func(o *loggerOptions) {
 		o.counterHook = hook
 	}
+}
+
+// RateLimitConfig tunes the per-key rate limiting driven by WithRateLimit.
+//
+// It is additive and its zero value is the recommended configuration, so a
+// Config written before this field existed keeps behaving the same way -- only
+// bounded.
+//
+// There is deliberately no idle-TTL knob to go with MaxKeys. Reclamation is
+// semantic: a key whose interval has elapsed with no unreported suppressions
+// holds no information an operator could observe, so it is the first thing
+// dropped when the map is full, and the oldest keys by last use go after that.
+// A TTL would only ask an operator to guess a second duration that the interval
+// already implies.
+type RateLimitConfig struct {
+	// MaxKeys bounds how many distinct rate-limit keys are tracked. Defaults
+	// to DefaultRateLimitMaxKeys.
+	//
+	// Rate-limit keys are caller data, so their cardinality is not something
+	// this library can predict; MaxKeys is the ceiling that keeps a
+	// high-cardinality key from turning the logger into a memory leak. Like
+	// SamplingConfig.MaxKeys it governs memory rather than emission, so any
+	// non-positive value -- zero meaning unset, negative meaning invalid --
+	// falls back to the same bounded default instead of being rejected. Raising
+	// it trades memory for a longer memory of which keys were recently limited.
+	MaxKeys int
 }
 
 // SamplingConfig controls the frequency and probability of logs.
@@ -208,7 +235,7 @@ func New(cfg Config, opts ...Option) Logger {
 	return &SlogLogger{
 		logger:        slogLogger,
 		levelVar:      levelVar,
-		rateState:     newRateState(),
+		rateState:     newRateState(cfg.RateLimit.MaxKeys),
 		counterHook:   optVal.counterHook,
 		lifecycle:     newLifecycleGroup(lifecycleHandlers...),
 		contextFields: cfg.ContextFields,

@@ -16,9 +16,17 @@ import (
 // callerPC and builds the record itself, so ComponentHandler (and
 // slog.HandlerOptions.AddSource) attribute the record to consumer code.
 type SlogLogger struct {
-	logger      *slog.Logger
-	levelVar    *slog.LevelVar
-	rateState   *rateState
+	logger   *slog.Logger
+	levelVar *slog.LevelVar
+
+	// rateState is captured at construction and deliberately shared by every
+	// derived logger. A per-request logger built with With must not come with
+	// a fresh set of limiters: that would let the one usage pattern the rate
+	// limit exists to protect -- a hot path that derives a logger per call --
+	// defeat it entirely. It is nil for a SlogLogger built by hand, which then
+	// simply has no rate limiting.
+	rateState *rateState
+
 	counterHook CounterHook
 
 	// lifecycle is captured at construction and shared by every derived
@@ -208,6 +216,16 @@ func (l *SlogLogger) emit(ctx context.Context, pc uintptr, level slog.Level, msg
 	_ = l.logger.Handler().Handle(ctx, record)
 }
 
+// With returns a logger carrying args on every record.
+//
+// The derived logger shares this one's rate-limit state on purpose. Deriving a
+// logger per request or per handler is the normal thing to do, and if each
+// derived logger got its own limiters a rate-limited key would be limited once
+// per derived logger -- which is to say, not at all. The lifecycle and the
+// counter hook are shared for the same reason.
+//
+// Rate-limit and counter options passed here are stripped rather than
+// remembered: they describe a single record, not a logger.
 func (l *SlogLogger) With(args ...any) Logger {
 	filtered, _, _ := extractLogOptions(args)
 	return &SlogLogger{
@@ -277,6 +295,67 @@ func (l *SlogLogger) Shutdown(ctx context.Context) error {
 // consumer submitted.
 func (l *SlogLogger) Rejected() uint64 {
 	return l.lifecycle.rejectedCount()
+}
+
+// RateLimitEvicted is the number of tracked rate-limit keys reclaimed to stay
+// within Config.RateLimit.MaxKeys.
+//
+// A number that keeps climbing means the key cardinality has outgrown the
+// bound: keys are being forgotten and re-created, so records that a stable key
+// would have suppressed are being emitted. Either lower the cardinality of the
+// keys or raise MaxKeys.
+//
+// Rate-limit state is shared with every logger derived through With, so this
+// counter reports the whole family, not this logger alone. It is zero for a
+// SlogLogger assembled by hand, which has no rate-limit state.
+func (l *SlogLogger) RateLimitEvicted() uint64 {
+	if l.rateState == nil {
+		return 0
+	}
+	return l.rateState.evicted.Load()
+}
+
+// RateLimitTrackedKeys is the number of rate-limit keys currently tracked. It
+// never exceeds Config.RateLimit.MaxKeys.
+//
+// Rate-limit state is shared with every logger derived through With, so this
+// reports the whole family, not this logger alone. It is zero for a SlogLogger
+// assembled by hand, which has no rate-limit state.
+func (l *SlogLogger) RateLimitTrackedKeys() int {
+	if l.rateState == nil {
+		return 0
+	}
+	l.rateState.mu.Lock()
+	defer l.rateState.mu.Unlock()
+	return len(l.rateState.limiters)
+}
+
+// RateLimitInvalid is the number of rate-limit keys created with a non-positive
+// interval. Those keys are emitted unlimited, so any non-zero value here is a
+// call site that believes it is rate limited and is not.
+//
+// Rate-limit state is shared with every logger derived through With, so this
+// counter reports the whole family, not this logger alone. It is zero for a
+// SlogLogger assembled by hand, which has no rate-limit state.
+func (l *SlogLogger) RateLimitInvalid() uint64 {
+	if l.rateState == nil {
+		return 0
+	}
+	return l.rateState.invalidConfigs.Load()
+}
+
+// RateLimitConflicts is the number of times a key was presented with an
+// interval other than the one it was created with. The first interval is kept,
+// so a non-zero value means some call site's interval is being ignored.
+//
+// Rate-limit state is shared with every logger derived through With, so this
+// counter reports the whole family, not this logger alone. It is zero for a
+// SlogLogger assembled by hand, which has no rate-limit state.
+func (l *SlogLogger) RateLimitConflicts() uint64 {
+	if l.rateState == nil {
+		return 0
+	}
+	return l.rateState.conflicts.Load()
 }
 
 // Sync is Flush with a background context.
