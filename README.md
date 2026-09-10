@@ -5,7 +5,7 @@ An extensible structured logging framework for Go, built on top of `log/slog`, d
 ## Features
 
 - Full support for `log/slog`
-- Rule-based filtering that drops a whole record when a key or key/value pair matches (no partial redaction — see [Filtering](#filtering))
+- Rule-based filtering that applies to record attrs, `With`/`WithAttrs`, and grouped attrs alike, in either drop-the-record or redact-the-field mode (see [Filtering](#filtering))
 - Built-in Prometheus metrics
 - Sampling and rate limiting
 - Context-aware and extensible with hooks
@@ -51,12 +51,24 @@ log := logger.New(logger.Config{
 
 ## Filtering
 
-`Config.FilterRules` drops an entire record when a rule matches — there is no
-partial redaction or field masking anywhere in the pipeline. If a rule matches
-a key that also carries sensitive data, the whole record (including every
-other field on it) is discarded rather than emitted with that one field
-scrubbed. Use this for suppressing noisy or unwanted log lines, not as a
-substitute for keeping sensitive data out of log calls in the first place.
+`Config.FilterRules` matches a key (case-insensitive) and, optionally, an
+exact value. A rule matches an attribute wherever it comes from — a direct
+log call, `logger.With(...)`/`WithAttrs`, or nested inside a `slog.Group` —
+so attaching a field through `With` is no safer than passing it inline.
+
+`Config.FilterMode` selects what a match does:
+
+- `handler.ModeDrop` (the default) discards the whole record, including every
+  other field on it. Use this for suppressing noisy or unwanted log lines.
+- `handler.ModeRedact` keeps the record and replaces only the matching
+  value — with `FilterRule.Replacement`, or `"[REDACTED]"` if unset — leaving
+  every other field and the record's time, level and message untouched.
+  Prefer this for anything resembling a security control: dropping an
+  ERROR-level line because it happened to mention a token loses the
+  incident, not just the token.
+
+A rule's `Key` matches an attribute's bare key at any nesting depth, or a
+dotted path (e.g. `"credential.password"`) to match only that nested field.
 
 ## Sampling
 
