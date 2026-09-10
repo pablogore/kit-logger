@@ -9,6 +9,7 @@ An extensible structured logging framework for Go, built on top of `log/slog`, d
 - Built-in Prometheus metrics
 - Sampling and rate limiting
 - Context-aware and extensible with hooks
+- Opt-in OpenTelemetry trace correlation (`trace_id` / `span_id`)
 - Asynchronous buffering with safe shutdown
 - Support for global fields and component-based logging
 - Pluggable HTTP and gRPC interceptors
@@ -157,11 +158,74 @@ log := logger.New(logger.Config{
 log.WithContext(ctx).Info("handling request")   // carries request_id
 ```
 
-A logger configured this way reads its own immutable field, so `WithContext`
-touches no package-level state at all and is unaffected by another part of the
-process calling `SetContextFieldExtractor`. That function still works as a
-process-wide fallback for loggers without their own extractor, and is now
-deprecated.
+A logger configured this way reads its own immutable field, so it touches no
+package-level state at all and is unaffected by another part of the process
+calling `SetContextFieldExtractor`. That function still works as a process-wide
+fallback for loggers without their own extractor, and is now deprecated.
+
+The extractor also runs on every `*Context` log method, not only `WithContext`:
+
+```go
+log.InfoContext(ctx, "handling request")   // carries request_id too
+```
+
+That used to be the surprising half of the API. `WithContext(ctx).Info(...)`
+carried the configured fields and `InfoContext(ctx, ...)` — the call everybody
+reaches for — silently carried none of them.
+
+Pick one style per call site: `WithContext` for a derived logger reused across
+several calls, the `*Context` methods for a single call. Doing both applies the
+extractor twice.
+
+## Trace correlation (OpenTelemetry)
+
+Logs and traces are only useful together. `pkg/logger/otel` adds `trace_id` and
+`span_id` to every record whose context carries a span, so a slow span in the
+tracing backend becomes a one-field log query instead of a timestamp hunt across
+40,000 concurrent lines.
+
+```go
+import kitotel "github.com/pablogore/kit-logger/pkg/logger/otel"
+
+log := logger.New(logger.Config{
+    Level:          "info",
+    Format:         "json",
+    ContextHandler: kitotel.Decorator(kitotel.Options{}),
+})
+
+log.ErrorContext(ctx, "stock check failed")
+// {"level":"ERROR", ..., "trace_id":"4bf92f...4736", "span_id":"00f067aa0ba902b7"}
+```
+
+**The dependency is opt-in.** `pkg/logger` and `pkg/logger/handler` do not
+import OpenTelemetry, and never will:
+
+```bash
+go list -deps ./pkg/logger ./pkg/logger/handler | rg opentelemetry   # empty
+go list -deps ./pkg/logger/otel | rg 'otel/sdk'                      # empty
+```
+
+The subpackage depends on `go.opentelemetry.io/otel/trace` — the API module —
+and nothing else. Reading a span context needs no SDK, no exporter and no
+tracer provider.
+
+What it deliberately does *not* do: create, start, end or sample spans; export
+log records over OTLP; parse `traceparent` headers (that is the propagator's
+job). It reads state that is already there.
+
+- Records with **no span carry no correlation fields at all** — not empty ones —
+  and the no-span path allocates nothing.
+- `Config.ContextHandler` installs the handler as the **outermost** decorator,
+  above the buffer. A handler that reads the caller's context has to run on the
+  caller's goroutine.
+- `Options` covers the rest: `TraceIDKey`/`SpanIDKey` to rename the fields,
+  `Group` to nest them, `TraceFlags` to also emit the sampling flags, and
+  `OnlySampled` to skip unsampled spans. `OnlySampled` is **off** by default: an
+  unsampled span still has a valid trace ID, and correlating a request whose
+  trace was dropped is often all you have left.
+
+`ContextHandler` is a plain `func(slog.Handler) slog.Handler`, so the same seam
+takes any context-reading handler, not only this one.
 
 ## Tests
 
@@ -222,6 +286,8 @@ pkg/logger/
 │   └── interceptor.go       # UnaryLoggingInterceptor
 ├── httpmw/
 │   └── middleware.go        # Middleware
+├── otel/
+│   └── handler.go           # OpenTelemetry trace correlation
 ├── utils/
 │   └── ...                  # shared helpers
 ├── kitlogtest/
