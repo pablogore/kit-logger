@@ -12,7 +12,7 @@ An extensible structured logging framework for Go, built on top of `log/slog`, d
 - Opt-in OpenTelemetry trace correlation (`trace_id` / `span_id`)
 - Asynchronous buffering with safe shutdown
 - Support for global fields and component-based logging
-- Pluggable HTTP and gRPC interceptors
+- Pluggable HTTP and gRPC interceptors, with a request-ID-propagating HTTP middleware
 
 ## Basic Usage
 
@@ -270,8 +270,76 @@ import (
 
 grpcServer := grpc.NewServer(grpc.UnaryInterceptor(kitgrpc.UnaryLoggingInterceptor()))
 
-var handler http.Handler = httpmw.Middleware()(next)
+var handler http.Handler = httpmw.New(httpmw.Options{Logger: log})(next)
 ```
+
+### HTTP middleware
+
+`httpmw.New` logs one line per request and is careful to observe without
+altering. `httpmw.Middleware()` is `New(Options{})` and stays for source
+compatibility; it uses the process-wide logger.
+
+```go
+mw := httpmw.New(httpmw.Options{
+    Logger:    log,                  // nil falls back to logger.L()
+    SkipPaths: []string{"/healthz"}, // served and un-logged
+})
+```
+
+**The response writer keeps its optional interfaces.** A wrapper that embeds the
+`http.ResponseWriter` *interface* promotes only `Header`, `Write` and
+`WriteHeader` — so `w.(http.Flusher)` fails behind it and SSE, WebSocket
+upgrades, HTTP/2 push and `httputil.ReverseProxy` all break. This wrapper
+implements `http.Flusher`, `http.Hijacker`, `http.Pusher` and `io.ReaderFrom`
+explicitly, plus `Unwrap()` for `http.NewResponseController`.
+
+The trade-off, stated plainly: because those methods are declared
+unconditionally, a type assertion now always succeeds. When the underlying
+writer cannot do the thing, `Flush` is a no-op, `Hijack` and `Push` return
+`http.ErrNotSupported`, and `ReadFrom` falls back to `io.Copy` — still counting
+the bytes. Use `http.NewResponseController(w)` when you need an honest answer.
+
+**The request ID is actually propagated.** It is read from `X-Request-Id` (or
+`Options.RequestIDHeader`), generated when absent, put in the request context,
+echoed on the response, and logged:
+
+```go
+func handler(w http.ResponseWriter, r *http.Request) {
+    id, ok := httpmw.RequestIDFrom(r.Context())
+    ...
+}
+```
+
+An inbound header is reused verbatim only when it is usable — non-empty, at most
+200 bytes, printable ASCII. It is attacker-controlled and goes straight into the
+log stream, so a value carrying a newline (which can forge log entries in any
+line-oriented format) is replaced with a generated one.
+
+Wire it to `Config.ContextFields` and every log line in the request gets it for
+free:
+
+```go
+log := logger.New(logger.Config{
+    ContextFields: func(ctx context.Context) []any {
+        if id, ok := httpmw.RequestIDFrom(ctx); ok {
+            return []any{"request_id", id}
+        }
+        return nil
+    },
+})
+```
+
+**Panics are logged and re-panicked.** A handler that panics used to produce no
+kit-logger line at all — the endpoint that was 100% broken was the one with no
+log entries. It now emits one `Error` line with `panic` and `stack`, then
+re-panics so the server behaves exactly as before. `http.ErrAbortHandler` is
+net/http's quiet abort signal, so it is logged without a stack trace.
+
+The rest of what changed: `status` is the **first** `WriteHeader` (what the
+client actually received) rather than the last, `bytes_written` is recorded, the
+level follows the outcome (5xx → Error, 4xx → Warn, else Info — override with
+`Options.LevelFor`), a cancelled request carries `context_err`, and ID
+generation can no longer panic the request.
 
 ## Package Structure
 
