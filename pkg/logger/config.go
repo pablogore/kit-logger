@@ -34,8 +34,11 @@ var (
 
 // Config holds the configuration for the logger.
 type Config struct {
-	BufferSize   int
-	FilterRules  []handler.FilterRule
+	BufferSize  int
+	FilterRules []handler.FilterRule
+	// FilterMode selects what a FilterRules match does. Defaults to
+	// handler.ModeDrop, matching this field's pre-existing behavior.
+	FilterMode   handler.Mode
 	Format       string
 	GlobalFields map[string]string
 	Handler      slog.Handler // optional; if set, used as the base handler (e.g. for tests)
@@ -197,7 +200,7 @@ func New(cfg Config, opts ...Option) Logger {
 		}
 
 		if len(cfg.FilterRules) > 0 {
-			h = handler.NewFilterHandler(h, cfg.FilterRules)
+			h = handler.NewFilterHandlerWithMode(h, cfg.FilterRules, cfg.FilterMode)
 		}
 		if len(cfg.GlobalFields) > 0 {
 			h = handler.NewGlobalFieldsHandler(h, cfg.GlobalFields, true)

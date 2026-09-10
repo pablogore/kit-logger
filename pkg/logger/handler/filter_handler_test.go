@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/pablogore/kit-logger/pkg/logger/handler"
 	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
@@ -283,6 +284,249 @@ func TestFilterHandler_WithAttrs_PreservesRules(t *testing.T) {
 	// Test non-filtered message
 	logger.Info("test", "secret", "user")
 	assert.Equal(t, "test", captured.Message, "Log should pass through")
+}
+
+// --- KITLOG-GO-016: With/WithAttrs/group bypass and redaction mode ---
+
+func TestFilterHandler_WithFiltersAttribute(t *testing.T) {
+	var received bool
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
+		received = true
+	})
+
+	h := handler.NewFilterHandler(base, []handler.FilterRule{{Key: "password"}})
+	logger := slog.New(h).With("password", "secret")
+	logger.Info("login")
+
+	require.False(t, received, "a With-supplied password must be filtered, not just a record attr")
+}
+
+func TestFilterHandler_ChainedWithFiltersAttribute(t *testing.T) {
+	var received bool
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
+		received = true
+	})
+
+	h := handler.NewFilterHandler(base, []handler.FilterRule{{Key: "token"}})
+	logger := slog.New(h).With("user", "u").With("token", "t")
+	logger.Info("login")
+
+	require.False(t, received, "a token attached through a chain of With calls must still be filtered")
+}
+
+func TestFilterHandler_FiltersAttributeInsideGroup(t *testing.T) {
+	var received bool
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
+		received = true
+	})
+
+	h := handler.NewFilterHandler(base, []handler.FilterRule{{Key: "password"}})
+	logger := slog.New(h)
+	logger.Info("credential rotated", slog.Group("credential", slog.String("password", "s")))
+
+	require.False(t, received, "a password nested inside a group must be filtered by its bare key")
+}
+
+func TestFilterHandler_DottedPathRuleMatchesOnlyNestedAttr(t *testing.T) {
+	nestedFiltered := func() bool {
+		var received bool
+		base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
+			received = true
+		})
+		h := handler.NewFilterHandler(base, []handler.FilterRule{{Key: "credential.password"}})
+		slog.New(h).Info("msg", slog.Group("credential", slog.String("password", "s")))
+		return !received
+	}()
+	require.True(t, nestedFiltered, "credential.password rule must match the nested attr")
+
+	topLevelFiltered := func() bool {
+		var received bool
+		base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
+			received = true
+		})
+		h := handler.NewFilterHandler(base, []handler.FilterRule{{Key: "credential.password"}})
+		slog.New(h).Info("msg", "password", "s")
+		return !received
+	}()
+	require.False(t, topLevelFiltered, "credential.password rule must not match a top-level password")
+}
+
+func TestFilterHandler_WithGroupFiltersRecordAttrByBareKey(t *testing.T) {
+	var received bool
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
+		received = true
+	})
+
+	h := handler.NewFilterHandler(base, []handler.FilterRule{{Key: "password"}})
+	logger := slog.New(h).WithGroup("auth")
+	logger.Info("msg", "password", "s")
+
+	require.False(t, received, "a rule must apply to a record attr nested by WithGroup")
+}
+
+func TestFilterHandler_KeyMatchingIsCaseInsensitive(t *testing.T) {
+	var received bool
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
+		received = true
+	})
+
+	h := handler.NewFilterHandler(base, []handler.FilterRule{{Key: "Password"}})
+	slog.New(h).Info("msg", "password", "s")
+
+	require.False(t, received, "key matching must be case-insensitive")
+}
+
+// TestFilterHandler_SiblingsFromSameParentDoNotAlias pins the backing-array
+// aliasing regression: two loggers derived from the same parent via With must
+// not observe attrs the other one added, even after the parent's held ops
+// slice has spare capacity to grow into.
+func TestFilterHandler_SiblingsFromSameParentDoNotAlias(t *testing.T) {
+	var capturedA, capturedB slog.Record
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
+		// Whichever sibling logs, capture into both so either overwrite is visible.
+		if capturedA.Message == "" {
+			capturedA = r
+			return
+		}
+		capturedB = r
+	})
+
+	var parent *handler.FilterHandler = handler.NewFilterHandler(base, []handler.FilterRule{{Key: "nonexistent"}})
+	// Grow the held ops across several calls -- Go's allocator commonly rounds
+	// a small slice's backing array up to the next size class, leaving spare
+	// capacity a later append could silently reuse without slices.Clip -- then
+	// branch two independent children from the same parent.
+	for i := 0; i < 8; i++ {
+		parent = parent.WithAttrs([]slog.Attr{slog.Int("seed", i)}).(*handler.FilterHandler)
+	}
+
+	childA := parent.WithAttrs([]slog.Attr{slog.String("only_a", "a")})
+	childB := parent.WithAttrs([]slog.Attr{slog.String("only_b", "b")})
+
+	slog.New(childA).Info("from a")
+	slog.New(childB).Info("from b")
+
+	hasKey := func(r slog.Record, key string) bool {
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key {
+				found = true
+			}
+			return true
+		})
+		return found
+	}
+
+	require.True(t, hasKey(capturedA, "only_a"))
+	require.False(t, hasKey(capturedA, "only_b"), "sibling B's attr must not leak into A's record")
+	require.True(t, hasKey(capturedB, "only_b"))
+	require.False(t, hasKey(capturedB, "only_a"), "sibling A's attr must not leak into B's record")
+}
+
+func TestFilterHandler_RedactModeKeepsRecordAndReplacesOnlyMatch(t *testing.T) {
+	var captured slog.Record
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
+		captured = r
+	})
+
+	h := handler.NewFilterHandlerWithMode(base, []handler.FilterRule{{Key: "password"}}, handler.ModeRedact)
+	logger := slog.New(h).With("password", "secret")
+	before := time.Now()
+	logger.Info("login", "user", "alice")
+
+	require.Equal(t, "login", captured.Message, "ModeRedact must keep the record")
+	require.False(t, captured.Time.Before(before.Add(-time.Second)), "ModeRedact must preserve a sane Time")
+
+	var gotPassword, gotUser string
+	captured.Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "password":
+			gotPassword = a.Value.String()
+		case "user":
+			gotUser = a.Value.String()
+		}
+		return true
+	})
+
+	assert.Equal(t, "[REDACTED]", gotPassword, "the matching value must be replaced")
+	assert.Equal(t, "alice", gotUser, "every other attr must be left byte-identical")
+}
+
+func TestFilterHandler_RedactModeUsesCustomReplacement(t *testing.T) {
+	var captured slog.Record
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
+		captured = r
+	})
+
+	h := handler.NewFilterHandlerWithMode(base, []handler.FilterRule{
+		{Key: "token", Replacement: "***"},
+	}, handler.ModeRedact)
+	slog.New(h).Info("msg", "token", "abc123")
+
+	var got string
+	captured.Attrs(func(a slog.Attr) bool {
+		if a.Key == "token" {
+			got = a.Value.String()
+		}
+		return true
+	})
+	assert.Equal(t, "***", got)
+}
+
+func TestFilterHandler_RedactModePreservesLevelAndPC(t *testing.T) {
+	var captured slog.Record
+	base := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
+		captured = r
+	})
+
+	h := handler.NewFilterHandlerWithMode(base, []handler.FilterRule{{Key: "password"}}, handler.ModeRedact)
+	logger := slog.New(h)
+	logger.Error("oops", "password", "secret")
+
+	require.Equal(t, slog.LevelError, captured.Level)
+	require.NotZero(t, captured.PC, "ModeRedact must preserve the caller PC")
+}
+
+func TestFilterHandler_DropModeStillDropsRecordAttrs(t *testing.T) {
+	var received bool
+	base := kitlogtest.NewTestHandler(func(_ context.Context, _ slog.Record) {
+		received = true
+	})
+
+	h := handler.NewFilterHandler(base, []handler.FilterRule{{Key: "password"}})
+	slog.New(h).Info("msg", "password", "s")
+
+	require.False(t, received, "ModeDrop (the NewFilterHandler default) must keep discarding the whole record")
+}
+
+func TestFilterHandler_ZeroRulesFastPathForwardsImmediately(t *testing.T) {
+	// probe records every WithAttrs/WithGroup call it receives directly, so
+	// this test fails if FilterHandler defers them instead of forwarding at
+	// call time when there are no rules to check.
+	probe := &filterFastPathProbe{}
+
+	h := handler.NewFilterHandler(probe, nil)
+	h.WithAttrs([]slog.Attr{slog.String("a", "b")})
+	h.WithGroup("g")
+
+	require.Equal(t, 1, probe.withAttrsCalls, "WithAttrs must forward to next immediately with zero rules")
+	require.Equal(t, 1, probe.withGroupCalls, "WithGroup must forward to next immediately with zero rules")
+}
+
+type filterFastPathProbe struct {
+	withAttrsCalls int
+	withGroupCalls int
+}
+
+func (p *filterFastPathProbe) Enabled(context.Context, slog.Level) bool  { return true }
+func (p *filterFastPathProbe) Handle(context.Context, slog.Record) error { return nil }
+func (p *filterFastPathProbe) WithAttrs([]slog.Attr) slog.Handler {
+	p.withAttrsCalls++
+	return p
+}
+func (p *filterFastPathProbe) WithGroup(string) slog.Handler {
+	p.withGroupCalls++
+	return p
 }
 
 func TestFilterHandler_WithGroup_PreservesRules(t *testing.T) {
