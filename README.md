@@ -157,11 +157,25 @@ log := logger.New(logger.Config{
 log.WithContext(ctx).Info("handling request")   // carries request_id
 ```
 
-A logger configured this way reads its own immutable field, so `WithContext`
-touches no package-level state at all and is unaffected by another part of the
-process calling `SetContextFieldExtractor`. That function still works as a
-process-wide fallback for loggers without their own extractor, and is now
-deprecated.
+A logger configured this way reads its own immutable field, so it touches no
+package-level state at all and is unaffected by another part of the process
+calling `SetContextFieldExtractor`. That function still works as a process-wide
+fallback for loggers without their own extractor, and is now deprecated.
+
+The extractor also runs on every `*Context` log method, not only `WithContext`:
+
+```go
+log.InfoContext(ctx, "handling request")   // carries request_id too
+```
+
+That used to be the surprising half of the API. `WithContext(ctx).Info(...)`
+carried the configured fields and `InfoContext(ctx, ...)` — the call everybody
+reaches for — silently carried none of them.
+
+Pick one style per call site: `WithContext` for a derived logger reused across
+several calls, the `*Context` methods for a single call. Doing both applies the
+extractor twice.
+
 
 ## Tests
 

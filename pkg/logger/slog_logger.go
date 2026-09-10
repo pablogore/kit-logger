@@ -118,7 +118,7 @@ func (l *SlogLogger) DebugContext(ctx context.Context, msg string, args ...any) 
 	}
 	pc := callerPC()
 	l.logRateAware(args, func(filtered []any) {
-		l.emit(ctx, pc, slog.LevelDebug, msg, filtered)
+		l.emitContext(ctx, pc, slog.LevelDebug, msg, filtered)
 	})
 }
 
@@ -129,7 +129,7 @@ func (l *SlogLogger) InfoContext(ctx context.Context, msg string, args ...any) {
 	}
 	pc := callerPC()
 	l.logRateAware(args, func(filtered []any) {
-		l.emit(ctx, pc, slog.LevelInfo, msg, filtered)
+		l.emitContext(ctx, pc, slog.LevelInfo, msg, filtered)
 	})
 }
 
@@ -140,7 +140,7 @@ func (l *SlogLogger) WarnContext(ctx context.Context, msg string, args ...any) {
 	}
 	pc := callerPC()
 	l.logRateAware(args, func(filtered []any) {
-		l.emit(ctx, pc, slog.LevelWarn, msg, filtered)
+		l.emitContext(ctx, pc, slog.LevelWarn, msg, filtered)
 	})
 }
 
@@ -151,7 +151,7 @@ func (l *SlogLogger) ErrorContext(ctx context.Context, msg string, args ...any) 
 	}
 	pc := callerPC()
 	l.logRateAware(args, func(filtered []any) {
-		l.emit(ctx, pc, slog.LevelError, msg, filtered)
+		l.emitContext(ctx, pc, slog.LevelError, msg, filtered)
 	})
 }
 
@@ -162,7 +162,7 @@ func (l *SlogLogger) Log(ctx context.Context, level slog.Level, msg string, args
 	}
 	pc := callerPC()
 	l.logRateAware(args, func(filtered []any) {
-		l.emit(ctx, pc, level, msg, filtered)
+		l.emitContext(ctx, pc, level, msg, filtered)
 	})
 }
 
@@ -216,6 +216,43 @@ func (l *SlogLogger) emit(ctx context.Context, pc uintptr, level slog.Level, msg
 	_ = l.logger.Handler().Handle(ctx, record)
 }
 
+// emitContext is emit plus the fields this logger's context extractor derives
+// from ctx. Every *Context log method goes through it.
+//
+// Before this existed, the extractor ran only in WithContext, so the ergonomic
+// call — log.InfoContext(ctx, "msg") — silently carried none of the fields the
+// consumer had configured. The surprising half of the API was the one everybody
+// reaches for.
+//
+// Note that log.WithContext(ctx).InfoContext(ctx, "msg") now applies the
+// extractor twice. Pick one: WithContext for a derived logger reused across
+// several calls, the *Context methods for a single call.
+func (l *SlogLogger) emitContext(ctx context.Context, pc uintptr, level slog.Level, msg string, args []any) {
+	if fields := l.contextAttrs(ctx); len(fields) > 0 {
+		// args is the slice extractLogOptions built, freshly allocated per
+		// call, so appending to it cannot write into the caller's storage.
+		args = append(args, fields...)
+	}
+	l.emit(ctx, pc, level, msg, args)
+}
+
+// contextAttrs returns the fields this logger's extractor derives from ctx, or
+// nil when no extractor is configured.
+//
+// A logger built with Config.ContextFields uses its own immutable extractor and
+// touches no package-level state. Only a logger without one falls back to the
+// deprecated process-wide extractor, and that read is atomic.
+func (l *SlogLogger) contextAttrs(ctx context.Context) []any {
+	extract := l.contextFields
+	if extract == nil {
+		extract = contextFieldExtractor()
+	}
+	if extract == nil {
+		return nil
+	}
+	return extract(ctx)
+}
+
 // With returns a logger carrying args on every record.
 //
 // The derived logger shares this one's rate-limit state on purpose. Deriving a
@@ -244,14 +281,11 @@ func (l *SlogLogger) With(args ...any) Logger {
 // touches no package-level state at all. Only a logger without one falls back
 // to the deprecated process-wide extractor, and that read is atomic.
 func (l *SlogLogger) WithContext(ctx context.Context) Logger {
-	extract := l.contextFields
-	if extract == nil {
-		extract = contextFieldExtractor()
-	}
-	if extract == nil {
+	fields := l.contextAttrs(ctx)
+	if len(fields) == 0 {
 		return l
 	}
-	return l.With(extract(ctx)...)
+	return l.With(fields...)
 }
 
 func (l *SlogLogger) SetLevel(level slog.Level) {

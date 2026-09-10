@@ -48,10 +48,12 @@ type Config struct {
 	RateLimit    RateLimitConfig
 	Sampling     SamplingConfig
 
-	// ContextFields extracts fields from a context for WithContext. A logger
-	// configured with one reads its own immutable field and never consults the
-	// process-wide extractor, so it needs no synchronization and is unaffected
-	// by another part of the process calling SetContextFieldExtractor.
+	// ContextFields extracts fields from a context. A logger configured with
+	// one reads its own immutable field and never consults the process-wide
+	// extractor, so it needs no synchronization and is unaffected by another
+	// part of the process calling SetContextFieldExtractor.
+	//
+	// It is applied by WithContext and by every *Context log method.
 	ContextFields ContextFieldExtractorFunc
 
 	// Writer is the destination for the default text/JSON handler.
