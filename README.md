@@ -209,6 +209,21 @@ grpcServer := grpc.NewServer(grpc.UnaryInterceptor(kitgrpc.UnaryLoggingIntercept
 var handler http.Handler = httpmw.Middleware()(next)
 ```
 
+### HTTP middleware
+
+**The response writer keeps its optional interfaces.** A wrapper that embeds the
+`http.ResponseWriter` *interface* promotes only `Header`, `Write` and
+`WriteHeader` — so `w.(http.Flusher)` fails behind it and SSE, WebSocket
+upgrades, HTTP/2 push and `httputil.ReverseProxy` all break. This wrapper
+implements `http.Flusher`, `http.Hijacker`, `http.Pusher` and `io.ReaderFrom`
+explicitly, plus `Unwrap()` for `http.NewResponseController`.
+
+The trade-off, stated plainly: because those methods are declared
+unconditionally, a type assertion now always succeeds. When the underlying
+writer cannot do the thing, `Flush` is a no-op, `Hijack` and `Push` return
+`http.ErrNotSupported`, and `ReadFrom` falls back to `io.Copy` — still counting
+the bytes. Use `http.NewResponseController(w)` when you need an honest answer.
+
 ## Package Structure
 
 ```
