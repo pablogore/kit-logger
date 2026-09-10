@@ -59,7 +59,24 @@ type Config struct {
 	// Writer is the destination for the default text/JSON handler.
 	// Defaults to stdout. Ignored when Handler is set.
 	Writer io.Writer
+
+	// ContextHandler wraps the assembled pipeline as its outermost decorator.
+	//
+	// It is the seam for handlers that must read the caller's context, which is
+	// exactly what a handler cannot do from anywhere below the buffer: there it
+	// would run on the worker goroutine. Trace correlation is the intended use:
+	//
+	//	cfg.ContextHandler = kitotel.Decorator(kitotel.Options{})
+	//
+	// A function seam rather than a typed field is what keeps pkg/logger free
+	// of the OpenTelemetry dependency — the consumer imports
+	// pkg/logger/otel, this package never does.
+	ContextHandler HandlerDecorator
 }
+
+// HandlerDecorator wraps a handler in another one. It is the shape of the
+// Config.ContextHandler seam.
+type HandlerDecorator func(slog.Handler) slog.Handler
 
 // Option configures New (e.g. WithCounterHook).
 type Option func(*loggerOptions)
@@ -236,6 +253,16 @@ func New(cfg Config, opts ...Option) Logger {
 
 		if cfg.Hook != nil {
 			h = handler.NewHookHandler(h, cfg.Hook)
+		}
+	}
+
+	// Outermost, and after the flushers have been collected: a handler that
+	// reads the caller's context has to run on the caller's goroutine, which
+	// means above the buffer. Applied to a caller-supplied chain too, so a test
+	// can exercise the seam against its own sink.
+	if cfg.ContextHandler != nil {
+		if wrapped := cfg.ContextHandler(h); wrapped != nil {
+			h = wrapped
 		}
 	}
 
