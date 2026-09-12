@@ -999,7 +999,7 @@ func TestSamplingHandler_EvictedCounterStaysHonest(t *testing.T) {
 		prev := uint64(0)
 		for i := 0; i < distinct; i++ {
 			require.NoError(t, h.Handle(ctx, samRecord(slog.LevelInfo, fmt.Sprintf("event-%d", i))))
-			require.GreaterOrEqual(t, h.Evicted(), prev, "Evicted must never move backwards")
+			require.True(t, h.Evicted() >= prev, "Evicted must never move backwards")
 			prev = h.Evicted()
 			require.LessOrEqual(t, h.TrackedKeys(), maxKeys)
 			require.EqualValues(t, i+1, int(h.Evicted())+h.TrackedKeys(),

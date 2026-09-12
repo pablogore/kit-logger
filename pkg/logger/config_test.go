@@ -15,6 +15,7 @@ import (
 	"github.com/pablogore/kit-logger/pkg/logger/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 func TestL_WithNilLogger(t *testing.T) {
@@ -106,6 +107,7 @@ func TestNew_WithBufferSize(t *testing.T) {
 		BufferSize: 100,
 	}
 	logger := New(cfg)
+	t.Cleanup(func() { _ = logger.(ManagedLogger).Shutdown(context.Background()) })
 
 	assert.NotNil(t, logger)
 	assert.IsType(t, &SlogLogger{}, logger)
@@ -146,6 +148,7 @@ func TestNew_WithAllHandlers(t *testing.T) {
 		},
 	}
 	logger := New(cfg)
+	t.Cleanup(func() { _ = logger.(ManagedLogger).Shutdown(context.Background()) })
 
 	assert.NotNil(t, logger)
 	assert.IsType(t, &SlogLogger{}, logger)
@@ -380,6 +383,7 @@ func TestConfig_Writer_ComposesWithPipeline(t *testing.T) {
 		},
 	}
 	logger := New(cfg)
+	t.Cleanup(func() { _ = logger.(ManagedLogger).Shutdown(context.Background()) })
 	logger.Info("composed message", "secret", "kept")
 	require.NoError(t, logger.Sync())
 
@@ -439,13 +443,17 @@ func (s *syncBuffer) String() string {
 // TestMain intercepts the KITLOGGER_WRITER_SUBPROCESS re-exec below and exits
 // before testing.Main runs, so its own "PASS"/timing output never touches
 // stdout — leaving stdout to carry only what the logger itself writes there.
+// Once past that, goleak.VerifyTestMain runs the real suite and fails it if
+// any test leaves a goroutine running -- the regression net for every
+// derivation path (With, WithGroup, buffered/hooked pipelines) that could
+// start one and never stop it.
 func TestMain(m *testing.M) {
 	if os.Getenv("KITLOGGER_WRITER_SUBPROCESS") == "1" {
 		logger := New(Config{Writer: os.Stderr, Format: FormatJSON})
 		logger.Info("subprocess stderr message")
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	goleak.VerifyTestMain(m)
 }
 
 func TestConfig_Writer_StderrSubprocess(t *testing.T) {
@@ -547,6 +555,7 @@ func TestConfig_Sink_IsDecoratedLikeTheDefaultHandler(t *testing.T) {
 	t.Run("BufferSize buffers until Sync", func(t *testing.T) {
 		cap := newCapturingHandler()
 		logger := New(Config{Sink: cap, BufferSize: 10})
+		t.Cleanup(func() { _ = logger.(ManagedLogger).Shutdown(context.Background()) })
 		logger.Info("buffered")
 
 		assert.Empty(t, cap.getEntries(), "must not reach the sink before Sync")

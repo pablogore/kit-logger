@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"bytes"
 	"context"
 
 	"log/slog"
@@ -119,6 +120,26 @@ func TestGlobalFieldsHandler_OverrideTrue_ReplacesFields(t *testing.T) {
 	fields := flattenAttrs(captured)
 
 	require.Equal(t, "staging", fields["env"], "should override existing field when override=true")
+}
+
+// TestGlobalFieldsHandler_OverrideTrue_EmitsKeyExactlyOnce goes past
+// flattenAttrs -- which reads back a Go map and so cannot tell "one key" from
+// "two attrs that happen to collide in a map" -- and inspects the actual
+// encoded JSON line. override=true must replace the record's own "env" attr
+// rather than append a second one, so the serialized key appears once.
+func TestGlobalFieldsHandler_OverrideTrue_EmitsKeyExactlyOnce(t *testing.T) {
+	var buf bytes.Buffer
+
+	globalHandler := handler.NewGlobalFieldsHandler(slog.NewJSONHandler(&buf, nil), map[string]string{
+		"env": "staging",
+	}, true)
+
+	logger := slog.New(globalHandler)
+	logger.Info("request received", "env", "production")
+
+	line := bytes.TrimRight(buf.Bytes(), "\n")
+	assert.Equal(t, 1, bytes.Count(line, []byte(`"env"`)),
+		"override=true must replace the duplicate key, not append a second one: %s", line)
 }
 
 func TestGlobalFieldsHandler_WithGroup(t *testing.T) {

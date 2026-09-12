@@ -51,7 +51,7 @@ func BenchmarkComponentHandler(b *testing.B) {
 			_ = buffered.Handle(ctx, record)
 		}
 		b.StopTimer()
-		_ = buffered.Flush(ctx)
+		_ = buffered.Shutdown(ctx)
 	})
 }
 

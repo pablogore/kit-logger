@@ -34,10 +34,26 @@ func (h *GlobalFieldsHandler) Enabled(ctx context.Context, level slog.Level) boo
 
 // Handle processes the log record, adding global fields and passing it to the next handler.
 func (h *GlobalFieldsHandler) Handle(ctx context.Context, record slog.Record) error {
-	// Clone the original record
-	clone := record.Clone()
+	overridden := map[string]struct{}{}
+	if h.override {
+		for _, a := range h.fields {
+			overridden[a.Key] = struct{}{}
+		}
+	}
 
-	// Create a map with the existing attributes of the record
+	// Rebuild the record instead of cloning it, dropping any attr whose key a
+	// global field will override. Cloning and then AddAttrs-ing the global
+	// field on top would leave both the original and the override attr in
+	// the record, emitting the same key twice in the encoded output.
+	clone := slog.NewRecord(record.Time, record.Level, record.Message, record.PC)
+	record.Attrs(func(a slog.Attr) bool {
+		if _, drop := overridden[a.Key]; drop {
+			return true
+		}
+		clone.AddAttrs(a)
+		return true
+	})
+
 	existing := map[string]struct{}{}
 	clone.Attrs(func(a slog.Attr) bool {
 		existing[a.Key] = struct{}{}
