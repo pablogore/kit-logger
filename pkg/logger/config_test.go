@@ -737,6 +737,58 @@ func TestConfig_Validate_TypedAndLegacyConflictIsAnError(t *testing.T) {
 	assert.Contains(t, err.Error(), "Format")
 }
 
+// TestConfig_ZeroValueLevelCannotDetectLegacyConflict pins a documented
+// limitation of the typed/legacy bridge, not a bug: LevelInfo is Level's
+// zero value, so Config{Level: LevelInfo, LevelString: "debug"} is the exact
+// same struct value as Config{LevelString: "debug"} -- Validate has no way
+// to know the caller "explicitly" chose LevelInfo rather than leaving the
+// field untouched, so it cannot flag this as a conflict. LevelString wins.
+// See resolveLevel's doc comment. If this test ever starts failing because
+// Validate began rejecting the combination, that's a deliberate contract
+// change, not a regression -- update this test's expectations along with it.
+func TestConfig_ZeroValueLevelCannotDetectLegacyConflict(t *testing.T) {
+	cfg := Config{Level: LevelInfo, LevelString: "debug"}
+
+	assert.NoError(t, cfg.Validate())
+
+	resolved, err := resolveLevel("Level", cfg.Level, cfg.LevelString)
+	require.NoError(t, err)
+	assert.Equal(t, LevelDebug, resolved, "LevelString must still take effect despite the explicit zero-value Level")
+}
+
+func TestConfig_ZeroValueLevelAgreesWithLegacy(t *testing.T) {
+	cfg := Config{Level: LevelInfo, LevelString: "info"}
+
+	assert.NoError(t, cfg.Validate())
+
+	resolved, err := resolveLevel("Level", cfg.Level, cfg.LevelString)
+	require.NoError(t, err)
+	assert.Equal(t, LevelInfo, resolved)
+}
+
+// TestConfig_ZeroValueFormatCannotDetectLegacyConflict is
+// TestConfig_ZeroValueLevelCannotDetectLegacyConflict's counterpart for
+// Format/FormatString, with FormatText standing in for LevelInfo.
+func TestConfig_ZeroValueFormatCannotDetectLegacyConflict(t *testing.T) {
+	cfg := Config{Format: FormatText, FormatString: "json"}
+
+	assert.NoError(t, cfg.Validate())
+
+	resolved, err := resolveFormat("Format", cfg.Format, cfg.FormatString)
+	require.NoError(t, err)
+	assert.Equal(t, FormatJSON, resolved, "FormatString must still take effect despite the explicit zero-value Format")
+}
+
+func TestConfig_ZeroValueFormatAgreesWithLegacy(t *testing.T) {
+	cfg := Config{Format: FormatText, FormatString: "text"}
+
+	assert.NoError(t, cfg.Validate())
+
+	resolved, err := resolveFormat("Format", cfg.Format, cfg.FormatString)
+	require.NoError(t, err)
+	assert.Equal(t, FormatText, resolved)
+}
+
 func TestConfig_Validate_SamplingMinLevelStringConflict(t *testing.T) {
 	err := Config{Sampling: SamplingConfig{MinLevel: LevelWarn, MinLevelString: "error"}}.Validate()
 

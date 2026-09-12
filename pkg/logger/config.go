@@ -42,12 +42,20 @@ type Config struct {
 	FilterMode handler.Mode
 	Format     Format
 	// FormatString is a deprecated bridge for Format: parsed with ParseFormat
-	// and used only when Format is unset (its zero value, FormatText). If
-	// Format was itself set to something other than the value FormatString
-	// parses to, Validate reports the conflict instead of picking one
+	// and used whenever it is non-empty. If Format was also explicitly set to
+	// a value other than its zero value (FormatText) and it disagrees with
+	// FormatString, Validate reports the conflict instead of picking one
 	// silently.
 	//
-	// Deprecated: set Format directly.
+	// That guarantee has one gap: FormatText is Format's zero value, so a
+	// Config that never touches Format is indistinguishable from one that
+	// explicitly sets Format: FormatText. Config{FormatString: "json"} and
+	// Config{Format: FormatText, FormatString: "json"} are the same struct
+	// value, so both resolve to FormatJSON with no error -- Validate cannot
+	// detect that as a conflict. Do not combine FormatString with an
+	// explicit Format: FormatText if you need that combination rejected.
+	//
+	// Deprecated: set Format directly; do not combine it with FormatString.
 	FormatString string
 	GlobalFields map[string]string
 
@@ -92,10 +100,14 @@ type Config struct {
 	Keys []string
 
 	Level Level
-	// LevelString is a deprecated bridge for Level. See FormatString for the
-	// precedence rule between a typed field and its legacy string.
+	// LevelString is a deprecated bridge for Level. See FormatString's doc
+	// comment for the precedence rule and its zero-value gap: LevelInfo is
+	// Level's zero value, so Config{LevelString: "debug"} and
+	// Config{Level: LevelInfo, LevelString: "debug"} are the same struct
+	// value and both resolve to LevelDebug without Validate flagging a
+	// conflict.
 	//
-	// Deprecated: set Level directly.
+	// Deprecated: set Level directly; do not combine it with LevelString.
 	LevelString string
 	RateLimit   RateLimitConfig
 	Sampling    SamplingConfig
@@ -133,9 +145,14 @@ type Config struct {
 
 // Validate reports every problem with cfg that New cannot silently work
 // around: an unparsable LevelString/FormatString/Sampling.MinLevelString, a
-// typed field that disagrees with its legacy string bridge, an out-of-range
-// Format, a negative BufferSize, and everything Sampling.Validate already
-// checked.
+// typed field explicitly set to a non-zero value that disagrees with its
+// legacy string bridge, an out-of-range Format, a negative BufferSize, and
+// everything Sampling.Validate already checked.
+//
+// Validate cannot detect every typed/legacy disagreement: when the typed
+// field is left at its zero value (LevelInfo or FormatText), that is
+// indistinguishable from the caller having explicitly chosen it, so the
+// legacy string wins silently in that case. See LevelString's doc comment.
 func (cfg Config) Validate() error {
 	var errs []error
 
@@ -260,9 +277,11 @@ type SamplingConfig struct {
 	Interval time.Duration
 	MinLevel Level
 	// MinLevelString is a deprecated bridge for MinLevel, resolved with the
-	// same precedence rule as Config.LevelString.
+	// same precedence rule -- and the same zero-value gap -- as
+	// Config.LevelString.
 	//
-	// Deprecated: set MinLevel directly.
+	// Deprecated: set MinLevel directly; do not combine it with
+	// MinLevelString.
 	MinLevelString string
 
 	// Probability is the chance in [0,1] that a record passes the probability
