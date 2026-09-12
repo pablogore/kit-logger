@@ -129,6 +129,55 @@ func TestOutput_UserComponentKeyIsNotHijacked(t *testing.T) {
 	assert.NotContains(t, src["function"], "kit-logger", "no module path in the function name")
 }
 
+// TestOutput_AddSourceWinsOverAGlobalSourceField pins the one exception to
+// "global fields win": a pinned GlobalFields["source"] would otherwise
+// suppress the very attribution AddSource asked for, and the line would carry
+// a string where a shipper expects the group.
+func TestOutput_AddSourceWinsOverAGlobalSourceField(t *testing.T) {
+	var buf bytes.Buffer
+	log, err := NewWithError(Config{
+		Format:       FormatJSON,
+		Writer:       &buf,
+		AddSource:    true,
+		GlobalFields: map[string]string{"source": "external", "service": "orders"},
+	})
+	require.Error(t, err, "a global field that can never reach the line is a misconfiguration worth reporting")
+	assert.Contains(t, err.Error(), `GlobalFields["source"] is ignored when AddSource is set`)
+
+	log.Info("hi")
+
+	got := lines(&buf)
+	require.Len(t, got, 1)
+	assert.Equal(t, []string{"time", "level", "msg", "service", "source"}, jsonKeys(t, got[0]),
+		"exactly one source key, and it is the pipeline's")
+	var obj map[string]any
+	require.NoError(t, json.Unmarshal([]byte(got[0]), &obj))
+	src, ok := obj["source"].(map[string]any)
+	require.True(t, ok, "source must be the {function,file,line} group, not the global string")
+	assert.Equal(t, "output_test.go", src["file"])
+	assert.Contains(t, src["function"], "TestOutput_AddSourceWinsOverAGlobalSourceField")
+}
+
+// TestOutput_GlobalSourceFieldIsHonouredWithoutAddSource is the other half:
+// with attribution off, "source" is an ordinary key and a global field may
+// claim it like any other.
+func TestOutput_GlobalSourceFieldIsHonouredWithoutAddSource(t *testing.T) {
+	var buf bytes.Buffer
+	log, err := NewWithError(Config{
+		Format:       FormatJSON,
+		Writer:       &buf,
+		GlobalFields: map[string]string{"source": "external"},
+	})
+	require.NoError(t, err)
+
+	log.Info("hi", "source", "call-site")
+
+	got := lines(&buf)
+	require.Len(t, got, 1)
+	assert.Equal(t, []string{"time", "level", "msg", "source"}, jsonKeys(t, got[0]))
+	assert.Contains(t, got[0], `"source":"external"`)
+}
+
 func TestOutput_SourceIsOffByDefault(t *testing.T) {
 	var buf bytes.Buffer
 	New(Config{Format: FormatJSON, Writer: &buf}).Info("hi", "k", "v")
