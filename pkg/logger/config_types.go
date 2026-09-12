@@ -89,12 +89,18 @@ const (
 	FormatJSON
 )
 
-// String returns the canonical lowercase name ParseFormat accepts for f.
+// String returns the canonical lowercase name ParseFormat accepts for f, or
+// "format(N)" for a value with no name of its own (e.g. an out-of-range
+// Format that failed Validate but was constructed anyway).
 func (f Format) String() string {
-	if f == FormatJSON {
+	switch f {
+	case FormatText:
+		return "text"
+	case FormatJSON:
 		return "json"
+	default:
+		return fmt.Sprintf("format(%d)", uint8(f))
 	}
-	return "text"
 }
 
 // ParseFormat parses a format name case-insensitively, returning an error for
@@ -131,9 +137,20 @@ func (f Format) MarshalText() ([]byte, error) {
 //
 // An empty legacy string is a no-op: typed is returned unchanged. A
 // non-empty legacy string that fails to parse is always an error, regardless
-// of typed. Otherwise: if typed is still at its zero value (LevelInfo), the
-// caller never touched the typed field, so the parsed legacy value wins
-// outright; if typed was itself set, the two must agree or resolveLevel
+// of typed.
+//
+// Conflict detection between typed and legacy is only possible when typed
+// holds a non-zero value. A plain Go field cannot distinguish "the caller
+// left this at its zero value" from "the caller explicitly chose the zero
+// value" -- Config{LevelString: "debug"} and Config{Level: LevelInfo,
+// LevelString: "debug"} are the exact same struct value. So when typed ==
+// LevelInfo, presence cannot be determined: the parsed legacy value is used
+// as the effective result even if it differs from LevelInfo, and no
+// conflict is reported. That is a deliberate, documented limitation of this
+// bridge, not a best-effort guarantee that every contradiction is caught --
+// see TestConfig_ZeroValueLevelCannotDetectLegacyConflict. When typed is not
+// LevelInfo, it can only have gotten there through an explicit assignment,
+// so presence is unambiguous: the two must then agree, or resolveLevel
 // reports the conflict rather than picking one silently.
 func resolveLevel(label string, typed Level, legacy string) (Level, error) {
 	if legacy == "" {
@@ -149,7 +166,9 @@ func resolveLevel(label string, typed Level, legacy string) (Level, error) {
 	return parsed, nil
 }
 
-// resolveFormat is resolveLevel's counterpart for Format/FormatString.
+// resolveFormat is resolveLevel's counterpart for Format/FormatString: the
+// same zero-value presence limitation applies, with FormatText standing in
+// for LevelInfo -- see TestConfig_ZeroValueFormatCannotDetectLegacyConflict.
 func resolveFormat(label string, typed Format, legacy string) (Format, error) {
 	if legacy == "" {
 		return typed, nil

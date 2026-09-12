@@ -36,6 +36,14 @@ func TestLevel_JSONRoundTrip_RejectsInvalidValue(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestFormat_String_InvalidValue pins that an out-of-range Format's String()
+// names the numeric value instead of lying that it is "text" -- the old
+// implementation returned "text" for anything but FormatJSON, including an
+// invalid Format that Validate would separately reject.
+func TestFormat_String_InvalidValue(t *testing.T) {
+	assert.Equal(t, "format(42)", Format(42).String())
+}
+
 // TestFormat_YAMLRoundTrip pins the same contract through YAML, since
 // gopkg.in/yaml.v3 also drives unmarshaling off TextUnmarshaler.
 func TestFormat_YAMLRoundTrip(t *testing.T) {
