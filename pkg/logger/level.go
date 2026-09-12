@@ -28,10 +28,15 @@ func (h *levelHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return level >= h.level.Level() && h.next.Enabled(ctx, level)
 }
 
-// Handle forwards the record unconditionally. A record that reached Handle
-// was already accepted by Enabled, so there is nothing left for this handler
-// to decide.
+// Handle re-checks the level before forwarding. slog.Logger always calls
+// Enabled first, so this is redundant on that path -- but slog.Handler is a
+// public interface, and nothing stops a caller from invoking Handle directly
+// against a chain built from Config.Sink. Gating here too means the LevelVar
+// is honored regardless of how this handler is reached.
 func (h *levelHandler) Handle(ctx context.Context, record slog.Record) error {
+	if record.Level < h.level.Level() {
+		return nil
+	}
 	return h.next.Handle(ctx, record)
 }
 

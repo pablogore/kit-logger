@@ -141,6 +141,15 @@ func (cfg Config) Validate() error {
 		if cfg.Hook != nil {
 			ignored = append(ignored, "Hook")
 		}
+		if cfg.Writer != nil {
+			ignored = append(ignored, "Writer")
+		}
+		if cfg.Format != "" {
+			ignored = append(ignored, "Format")
+		}
+		if cfg.Level != "" {
+			ignored = append(ignored, "Level")
+		}
 		if len(ignored) > 0 {
 			errs = append(errs, fmt.Errorf("Config: PipelineOverride is set, which ignores: %s", strings.Join(ignored, ", ")))
 		}
@@ -275,20 +284,18 @@ func L() Logger {
 // New creates a new Logger instance with all handlers configured.
 // Optional opts (e.g. WithCounterHook) apply rate-limit-related behavior when WithRateLimit/WithCounter are used in log calls.
 //
-// A Config that fails Validate still produces a usable logger -- New reports
-// the problem to stderr rather than failing outright. Use NewWithError to
-// receive the error instead.
+// A Config that fails Validate still produces a usable logger -- New resolves
+// the invalid combination the same way NewWithError does and does not report
+// it anywhere. A library constructor must not perform I/O the caller did not
+// ask for; use NewWithError to receive the error instead.
 func New(cfg Config, opts ...Option) Logger {
-	l, err := NewWithError(cfg, opts...)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "kit-logger: invalid configuration: %v\n", err)
-	}
+	l, _ := NewWithError(cfg, opts...)
 	return l
 }
 
-// NewWithError is New, but returns cfg.Validate's error instead of only
-// printing it to stderr. The returned Logger is always usable: an invalid
-// combination is resolved the same way New resolves it (see Validate).
+// NewWithError is New, but also returns cfg.Validate's error. The returned
+// Logger is always usable: an invalid combination is resolved the same way
+// New resolves it (see Validate).
 func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 	level := parseLevel(cfg.Level)
 	levelVar := new(slog.LevelVar)

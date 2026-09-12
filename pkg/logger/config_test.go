@@ -560,11 +560,96 @@ func TestConfig_Validate_PipelineOverrideNamesIgnoredFields(t *testing.T) {
 	assert.Contains(t, err.Error(), "BufferSize")
 }
 
+// TestConfig_Validate_PipelineOverrideNamesEveryIgnoredField is the
+// regression net for the class of bug this fixes: PipelineOverride silently
+// ignoring a field that Validate did not know to name. One sub-test per
+// field the doc comment on PipelineOverride claims is ignored.
+func TestConfig_Validate_PipelineOverrideNamesEveryIgnoredField(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		cfg   Config
+	}{
+		{"Handler", "Handler", Config{Handler: discardHandler{}}},
+		{"Sink", "Sink", Config{Sink: discardHandler{}}},
+		{"FilterRules", "FilterRules", Config{FilterRules: []handler.FilterRule{{Key: "x"}}}},
+		{"GlobalFields", "GlobalFields", Config{GlobalFields: map[string]string{"a": "b"}}},
+		{"Sampling", "Sampling", Config{Sampling: SamplingConfig{Enabled: true}}},
+		{"BufferSize", "BufferSize", Config{BufferSize: 10}},
+		{"Hook", "Hook", Config{Hook: func(ctx context.Context, r slog.Record) (context.Context, bool) { return ctx, true }}},
+		{"Writer", "Writer", Config{Writer: &bytes.Buffer{}}},
+		{"Format", "Format", Config{Format: "json"}},
+		{"Level", "Level", Config{Level: "debug"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.PipelineOverride = discardHandler{}
+
+			err := cfg.Validate()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
+// TestConfig_Validate_PipelineOverrideDoesNotFlagFieldsThatStillApply pins
+// the other half of the contract: RateLimit, ContextFields and
+// ContextHandler are not routed through the ignored decorator chain, so
+// PipelineOverride must not name them.
+func TestConfig_Validate_PipelineOverrideDoesNotFlagFieldsThatStillApply(t *testing.T) {
+	cfg := Config{
+		PipelineOverride: discardHandler{},
+		RateLimit:        RateLimitConfig{MaxKeys: 10},
+		ContextFields:    func(ctx context.Context) []any { return nil },
+		ContextHandler:   func(h slog.Handler) slog.Handler { return h },
+	}
+
+	err := cfg.Validate()
+
+	assert.NoError(t, err)
+}
+
 func TestNewWithError_ReturnsValidateError(t *testing.T) {
 	logger, err := NewWithError(Config{Handler: discardHandler{}, Sink: discardHandler{}})
 
 	require.Error(t, err)
 	assert.NotNil(t, logger, "an invalid Config must still produce a usable logger")
+}
+
+// TestNew_InvalidConfigWritesNothingToStdoutOrStderr pins New as I/O-free
+// regardless of Validate's outcome: a library constructor must not perform
+// I/O the caller did not ask for, including reporting its own misuse.
+// NewWithError is the seam for a caller that wants the error.
+func TestNew_InvalidConfigWritesNothingToStdoutOrStderr(t *testing.T) {
+	outFile, err := os.CreateTemp("", "logger_silent_stdout")
+	require.NoError(t, err)
+	defer os.Remove(outFile.Name())
+	defer outFile.Close()
+
+	errFile, err := os.CreateTemp("", "logger_silent_stderr")
+	require.NoError(t, err)
+	defer os.Remove(errFile.Name())
+	defer errFile.Close()
+
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outFile, errFile
+	defer func() { os.Stdout, os.Stderr = oldStdout, oldStderr }()
+
+	cfg := Config{Handler: discardHandler{}, Sink: discardHandler{}}
+	require.Error(t, cfg.Validate(), "test setup: cfg must actually be invalid")
+
+	_ = New(cfg)
+
+	stdoutContent, err := os.ReadFile(outFile.Name())
+	require.NoError(t, err)
+	assert.Empty(t, stdoutContent, "New must not write to stdout even for an invalid Config")
+
+	stderrContent, err := os.ReadFile(errFile.Name())
+	require.NoError(t, err)
+	assert.Empty(t, stderrContent, "New must not write to stderr even for an invalid Config; use NewWithError to observe the error")
 }
 
 // TestConfig_PipelineOverride_BypassesDecoration pins the escape hatch: unlike
