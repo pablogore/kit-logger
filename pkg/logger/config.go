@@ -64,6 +64,10 @@ type Config struct {
 	// an attr with the same key from With, from a context extractor or from
 	// the call site never overrides them, and the line never carries the key
 	// twice. See handler.DedupHandler for the full semantics.
+	//
+	// The one key a global field cannot claim is "source" while AddSource is
+	// set: the call-site group owns it, the global is ignored and Validate
+	// reports it.
 	GlobalFields map[string]string
 
 	// AddSource attaches a "source" group (function, file, line) naming the
@@ -243,6 +247,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.BufferSize < 0 {
 		errs = append(errs, fmt.Errorf("Config: BufferSize must be >= 0, got %d", cfg.BufferSize))
+	}
+	if _, ok := cfg.GlobalFields[slog.SourceKey]; ok && cfg.AddSource {
+		errs = append(errs, fmt.Errorf("Config: GlobalFields[%q] is ignored when AddSource is set; the call-site group owns that key", slog.SourceKey))
 	}
 	if _, err := resolveLevel("Sampling.MinLevel", cfg.Sampling.MinLevel, cfg.Sampling.MinLevelString); err != nil {
 		errs = append(errs, err)
@@ -583,9 +590,18 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher, error) {
 // rename the pipeline's own attribution. A caller attr named "source" is
 // simply overridden by the group when AddSource is on, under the usual
 // last-wins rule, and left alone otherwise.
+//
+// A pinned attr, on the other hand, wins over everything -- including that
+// group -- so a GlobalFields["source"] would silently suppress the
+// attribution AddSource asked for. When AddSource is set, "source" is
+// therefore left out of the pinned set (and Validate reports it): the
+// pipeline's own source group is the one that reaches the line.
 func dedupOptions(cfg Config) handler.DedupOptions {
 	keys := make([]string, 0, len(cfg.GlobalFields))
 	for k := range cfg.GlobalFields {
+		if cfg.AddSource && k == slog.SourceKey {
+			continue
+		}
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
