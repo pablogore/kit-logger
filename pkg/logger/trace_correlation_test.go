@@ -105,6 +105,7 @@ func TestConfigContextHandler_CorrelatesAcrossTheBuffer(t *testing.T) {
 
 	managed, ok := log.(logger.ManagedLogger)
 	require.True(t, ok)
+	t.Cleanup(func() { _ = managed.Shutdown(context.Background()) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, managed.Flush(ctx))

@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -340,6 +341,74 @@ func TestShutdown_AccountsForEveryProducedRecord(t *testing.T) {
 	assertGoroutinesSettle(t, baseline)
 }
 
+// TestShutdown_AccountsForEveryProducedRecord_WithSamplingAndRateLimit extends
+// TestShutdown_AccountsForEveryProducedRecord's exact-accounting invariant to
+// a pipeline with sampling enabled, over 100 concurrent producers, each also
+// exercising the rate limiter concurrently -- proving the combination does
+// not silently lose a record anywhere in the chain, even when Shutdown lands
+// mid-flight.
+//
+// Every producer's first call uses a fresh, producer-private rate-limit key:
+// a fresh key's token bucket always starts full, so that call is guaranteed
+// to be admitted regardless of scheduling. That keeps the invariant exact --
+// no record can vanish into an unreported rate-limit suppression -- while
+// still driving rateState's locking and bookkeeping from 100+ goroutines at
+// once, concurrently with sampling and a mid-flight shutdown.
+func TestShutdown_AccountsForEveryProducedRecord_WithSamplingAndRateLimit(t *testing.T) {
+	rec := &lifecycleRecorder{}
+	sampled := handler.NewSamplingHandler(rec, handler.SamplingConfig{
+		Interval:    time.Hour,
+		Probability: 0.5,
+		MinLevel:    slog.LevelInfo,
+	})
+	buffered := handler.NewBufferedHandler(sampled, 16)
+
+	log, ok := New(Config{Handler: buffered}).(*SlogLogger)
+	require.True(t, ok)
+
+	const (
+		producers          = 120
+		recordsPerProducer = 30
+		produced           = producers * recordsPerProducer
+	)
+
+	baseline := runtime.NumGoroutine()
+
+	var wg sync.WaitGroup
+	wg.Add(producers)
+	for p := 0; p < producers; p++ {
+		p := p
+		go func() {
+			defer wg.Done()
+			key := fmt.Sprintf("producer-%d", p)
+			for i := 0; i < recordsPerProducer; i++ {
+				if i == 0 {
+					log.Info("produced", WithRateLimit(key, time.Hour))
+					continue
+				}
+				log.Info("produced")
+			}
+		}()
+	}
+
+	// Shut down mid-flight, not after the producers are done.
+	time.Sleep(time.Millisecond)
+	shutdownErr := log.Shutdown(context.Background())
+	wg.Wait()
+
+	require.NoError(t, shutdownErr)
+
+	delivered := len(rec.messages())
+	total := uint64(delivered) + buffered.Rejected() + buffered.Dropped() + sampled.Suppressed() + log.Rejected()
+	assert.Equal(t, uint64(produced), total,
+		"delivered=%d bufferRejected=%d bufferDropped=%d samplingSuppressed=%d loggerRejected=%d",
+		delivered, buffered.Rejected(), buffered.Dropped(), sampled.Suppressed(), log.Rejected())
+	assert.Zero(t, buffered.Queued())
+	assert.Zero(t, log.RateLimitConflicts(), "each producer used its own key, so no conflicting interval should ever be reported")
+
+	assertGoroutinesSettle(t, baseline)
+}
+
 func assertGoroutinesSettle(t *testing.T, baseline int) {
 	t.Helper()
 
@@ -354,6 +423,28 @@ func assertGoroutinesSettle(t *testing.T, baseline int) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// TestWith_RepeatedCalls_DoNotLeakGoroutines pins down that deriving a child
+// logger via With is a cheap, purely in-memory operation: it must not spawn
+// any background goroutine per call. Only the BufferedHandler's single
+// worker goroutine is expected to be alive throughout.
+func TestWith_RepeatedCalls_DoNotLeakGoroutines(t *testing.T) {
+	rec := &lifecycleRecorder{}
+	log, _ := newBufferedLogger(t, rec, 64)
+
+	baseline := runtime.NumGoroutine()
+
+	const iterations = 10_000
+	var child Logger = log
+	for i := 0; i < iterations; i++ {
+		child = child.With("iteration", i)
+	}
+	child.Info("final")
+
+	require.NoError(t, log.Shutdown(context.Background()))
+
+	assertGoroutinesSettle(t, baseline)
 }
 
 // countingCounterHook records how often each metric name was incremented.

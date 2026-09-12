@@ -123,7 +123,8 @@ func TestMultiHandler_Handle_WithErrors(t *testing.T) {
 		called1 = true
 	})
 
-	handler2 := &errorHandler{shouldError: true} // This handler will return an error
+	boom := errors.New("handler2 boom")
+	handler2 := &errorHandler{shouldError: true, err: boom} // This handler will return an error
 
 	handler3 := kitlogtest.NewTestHandler(func(_ context.Context, r slog.Record) {
 		called3 = true
@@ -131,10 +132,13 @@ func TestMultiHandler_Handle_WithErrors(t *testing.T) {
 
 	multi := handler.NewMultiHandler(handler1, handler2, handler3)
 
-	logger := slog.New(multi)
-	logger.Info("test with errors")
+	// slog.Logger.Info discards the Handler.Handle error entirely, so it
+	// cannot prove anything about MultiHandler's own error-aggregation
+	// behavior. Call Handle directly to observe what it actually returns.
+	err := multi.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "test with errors", 0))
 
-	// Verify that all handlers were called
+	require.Error(t, err, "an error from any child must be surfaced, not swallowed")
+	assert.ErrorIs(t, err, boom)
 	assert.True(t, called1, "handler1 should be called")
 	assert.True(t, called3, "handler3 should be called")
 }
