@@ -652,6 +652,77 @@ func TestNew_InvalidConfigWritesNothingToStdoutOrStderr(t *testing.T) {
 	assert.Empty(t, stderrContent, "New must not write to stderr even for an invalid Config; use NewWithError to observe the error")
 }
 
+// invalidSamplingConfig is a SamplingConfig that fails SamplingConfig.Validate
+// (Probability out of [0,1]), used to drive decorate's sampling branch down
+// its error path without going through the Handler/Sink validation checked by
+// the tests above.
+func invalidSamplingConfig() SamplingConfig {
+	return SamplingConfig{Enabled: true, Probability: -1}
+}
+
+// TestNew_InvalidSamplingWritesNothingToStdoutOrStderr pins decorate's
+// sampling branch to the same I/O-free contract as New itself: constructing
+// the handler chain must never report a problem on its own, even when the
+// invalid field lives inside SamplingConfig rather than Config directly.
+func TestNew_InvalidSamplingWritesNothingToStdoutOrStderr(t *testing.T) {
+	outFile, err := os.CreateTemp("", "logger_silent_sampling_stdout")
+	require.NoError(t, err)
+	defer os.Remove(outFile.Name())
+	defer outFile.Close()
+
+	errFile, err := os.CreateTemp("", "logger_silent_sampling_stderr")
+	require.NoError(t, err)
+	defer os.Remove(errFile.Name())
+	defer errFile.Close()
+
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outFile, errFile
+	defer func() { os.Stdout, os.Stderr = oldStdout, oldStderr }()
+
+	cfg := Config{Sampling: invalidSamplingConfig()}
+	require.Error(t, cfg.Validate(), "test setup: cfg must actually be invalid")
+
+	logger := New(cfg)
+	require.NotNil(t, logger, "an invalid Sampling config must still produce a usable logger")
+
+	stdoutContent, err := os.ReadFile(outFile.Name())
+	require.NoError(t, err)
+	assert.Empty(t, stdoutContent, "New must not write to stdout for invalid Sampling")
+
+	stderrContent, err := os.ReadFile(errFile.Name())
+	require.NoError(t, err)
+	assert.Empty(t, stderrContent, "New must not write to stderr for invalid Sampling; use NewWithError to observe the error")
+}
+
+// TestNewWithError_InvalidSamplingReturnsErrorWithoutWriting proves the
+// error still reaches a caller who asks for it (via NewWithError) while
+// decorate itself performs no I/O -- the two channels the previous review
+// found conflated.
+func TestNewWithError_InvalidSamplingReturnsErrorWithoutWriting(t *testing.T) {
+	errFile, err := os.CreateTemp("", "logger_silent_sampling_stderr_2")
+	require.NoError(t, err)
+	defer os.Remove(errFile.Name())
+	defer errFile.Close()
+
+	oldStderr := os.Stderr
+	os.Stderr = errFile
+	defer func() { os.Stderr = oldStderr }()
+
+	cap := newCapturingHandler()
+	logger, err := NewWithError(Config{Sink: cap, Sampling: invalidSamplingConfig()})
+
+	require.Error(t, err, "NewWithError must surface the invalid Sampling config")
+	assert.Contains(t, err.Error(), "Probability")
+	require.NotNil(t, logger)
+
+	logger.Info("still emits under the safe, emitting-default sampler")
+	assert.Len(t, cap.getEntries(), 1, "the documented safe/emitting fallback must still emit records")
+
+	stderrContent, readErr := os.ReadFile(errFile.Name())
+	require.NoError(t, readErr)
+	assert.Empty(t, stderrContent, "NewWithError must not also write the error to stderr")
+}
+
 // TestConfig_PipelineOverride_BypassesDecoration pins the escape hatch: unlike
 // Sink, PipelineOverride skips every decorator, exactly as Handler used to.
 func TestConfig_PipelineOverride_BypassesDecoration(t *testing.T) {

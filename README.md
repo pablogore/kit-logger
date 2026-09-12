@@ -50,7 +50,7 @@ log := logger.New(logger.Config{
 
 **`Config.Sink` replaces `Writer`, not the rest of the pipeline.** Supplying a `slog.Handler` of your own as `Config.Sink` still gets `FilterRules`, `GlobalFields`, the component handler, `Sampling`, the Prometheus handler, `BufferSize`, `Hook` and `SetLevel` applied on top of it, exactly like the built-in Text/JSON handler does. `Config.Handler` is a deprecated alias for `Sink` (`Sink` wins if both are set) — it used to bypass the whole pipeline, but no longer does.
 
-If you need the old total-bypass behavior — a hand-built chain that must not be redecorated — use `Config.PipelineOverride` instead. `Config.Validate()` (also reachable through `NewWithError`) reports an error naming every other field `PipelineOverride` causes to be ignored.
+If you need the old total-bypass behavior — a hand-built chain that must not be redecorated — use `Config.PipelineOverride` instead. It bypasses the handler-decoration pipeline only: `Sink`/`Handler`, `FilterRules`, `GlobalFields`, `Sampling`, `BufferSize`, `Hook`, `Writer`, `Format` and `Level` are all ignored, and `Config.Validate()` (also reachable through `NewWithError`) reports an error naming each one that was set. Logger-level behavior outside that chain is unaffected — `RateLimit`, `ContextFields` and the outer `ContextHandler` still apply.
 
 ## Filtering
 
