@@ -40,6 +40,12 @@ type SlogLogger struct {
 	// immutable is what makes WithContext race-free without a single atomic
 	// operation on the hot path.
 	contextFields ContextFieldExtractorFunc
+
+	// callerSkip is the number of extra stack frames to skip past the
+	// caller of an exported log method when attributing a record. It is
+	// zero for a logger that consumers call directly and n for one wrapped
+	// by n layers of adapter; see WithCallerSkip.
+	callerSkip int
 }
 
 // callerPCSkip is the runtime.Callers skip depth that lands on the caller of an
@@ -57,11 +63,12 @@ type SlogLogger struct {
 const callerPCSkip = 3
 
 // callerPC returns the program counter of the caller of the exported log method
-// that invoked it. It returns 0 if no such frame exists, which makes
-// ComponentHandler add no component group rather than a wrong one.
-func callerPC() uintptr {
+// that invoked it, extra frames further up the stack. It returns 0 if no such
+// frame exists, which makes ComponentHandler add no component group rather
+// than a wrong one.
+func callerPC(extra int) uintptr {
 	var pcs [1]uintptr
-	if runtime.Callers(callerPCSkip, pcs[:]) == 0 {
+	if runtime.Callers(callerPCSkip+extra, pcs[:]) == 0 {
 		return 0
 	}
 	return pcs[0]
@@ -72,7 +79,7 @@ func (l *SlogLogger) Debug(msg string, args ...any) {
 	if !l.logger.Enabled(ctx, slog.LevelDebug) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emit(ctx, pc, slog.LevelDebug, msg, filtered)
 	})
@@ -83,7 +90,7 @@ func (l *SlogLogger) Info(msg string, args ...any) {
 	if !l.logger.Enabled(ctx, slog.LevelInfo) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emit(ctx, pc, slog.LevelInfo, msg, filtered)
 	})
@@ -94,7 +101,7 @@ func (l *SlogLogger) Warn(msg string, args ...any) {
 	if !l.logger.Enabled(ctx, slog.LevelWarn) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emit(ctx, pc, slog.LevelWarn, msg, filtered)
 	})
@@ -105,7 +112,7 @@ func (l *SlogLogger) Error(msg string, args ...any) {
 	if !l.logger.Enabled(ctx, slog.LevelError) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emit(ctx, pc, slog.LevelError, msg, filtered)
 	})
@@ -116,7 +123,7 @@ func (l *SlogLogger) DebugContext(ctx context.Context, msg string, args ...any) 
 	if !l.logger.Enabled(ctx, slog.LevelDebug) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emitContext(ctx, pc, slog.LevelDebug, msg, filtered)
 	})
@@ -127,7 +134,7 @@ func (l *SlogLogger) InfoContext(ctx context.Context, msg string, args ...any) {
 	if !l.logger.Enabled(ctx, slog.LevelInfo) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emitContext(ctx, pc, slog.LevelInfo, msg, filtered)
 	})
@@ -138,7 +145,7 @@ func (l *SlogLogger) WarnContext(ctx context.Context, msg string, args ...any) {
 	if !l.logger.Enabled(ctx, slog.LevelWarn) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emitContext(ctx, pc, slog.LevelWarn, msg, filtered)
 	})
@@ -149,7 +156,7 @@ func (l *SlogLogger) ErrorContext(ctx context.Context, msg string, args ...any) 
 	if !l.logger.Enabled(ctx, slog.LevelError) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emitContext(ctx, pc, slog.LevelError, msg, filtered)
 	})
@@ -160,7 +167,7 @@ func (l *SlogLogger) Log(ctx context.Context, level slog.Level, msg string, args
 	if !l.logger.Enabled(ctx, level) {
 		return
 	}
-	pc := callerPC()
+	pc := callerPC(l.callerSkip)
 	l.logRateAware(args, func(filtered []any) {
 		l.emitContext(ctx, pc, level, msg, filtered)
 	})
@@ -272,7 +279,38 @@ func (l *SlogLogger) With(args ...any) Logger {
 		counterHook:   l.counterHook,
 		lifecycle:     l.lifecycle,
 		contextFields: l.contextFields,
+		callerSkip:    l.callerSkip,
 	}
+}
+
+// WithCallerSkip returns a logger that attributes every record n stack frames
+// further up than this one does. It is for adapters: a wrapper that
+// implements some other logging interface on top of this Logger sits one
+// frame between the consumer and the exported log method, so without it every
+// record is attributed to the wrapper's own file.
+//
+//	type adapter struct{ log logger.Logger }
+//
+//	func newAdapter(log logger.Logger) *adapter {
+//	    if s, ok := log.(logger.CallerSkipper); ok {
+//	        log = s.WithCallerSkip(1)
+//	    }
+//	    return &adapter{log: log}
+//	}
+//
+//	func (a *adapter) Info(msg string, args ...any) { a.log.Info(msg, args...) }
+//
+// Skips add up: WithCallerSkip(1).WithCallerSkip(1) skips two frames, so a
+// wrapper around a wrapper composes without either knowing about the other.
+// A non-positive n returns the receiver. The derived logger shares this one's
+// rate-limit state, lifecycle and counter hook, exactly like With.
+func (l *SlogLogger) WithCallerSkip(n int) Logger {
+	if n <= 0 {
+		return l
+	}
+	derived := *l
+	derived.callerSkip = l.callerSkip + n
+	return &derived
 }
 
 // WithContext returns a logger carrying the fields extracted from ctx.

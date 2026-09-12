@@ -496,6 +496,33 @@ level follows the outcome (5xx → Error, 4xx → Warn, else Info — override w
 `Options.LevelFor`), a cancelled request carries `context_err`, and ID
 generation can no longer panic the request.
 
+## Adapters and call-site attribution
+
+Every record names the file, line and function that logged it, read from the
+PC the facade captures one frame above its own exported method. A wrapper that
+implements another library's logging interface on top of `logger.Logger` adds
+a frame in between, so without help every record would name the wrapper. Tell
+the logger how many frames the wrapper adds, once, with `WithCallerSkip`, the
+same idea as zap's `AddCallerSkip`:
+
+```go
+type adapter struct{ log logger.Logger }
+
+func newAdapter(log logger.Logger) *adapter {
+    if s, ok := log.(logger.CallerSkipper); ok {
+        log = s.WithCallerSkip(1) // one frame: the adapter's own method
+    }
+    return &adapter{log: log}
+}
+
+func (a *adapter) Info(msg string, args ...any) { a.log.Info(msg, args...) }
+```
+
+`CallerSkipper` is an optional interface, so a `Logger` implementation that
+does not support it keeps compiling; assert for it as above. Skips add up
+through `With` and `WithContext`, and a wrapper that itself forwards
+`WithCallerSkip` composes with a wrapper around it.
+
 ## Known limitations
 
 Sharp edges that are true at HEAD, each with the issue that explains it. The

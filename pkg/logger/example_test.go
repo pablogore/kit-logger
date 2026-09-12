@@ -124,3 +124,24 @@ func Example_contextFields() {
 	log.WithContext(ctx).Info("handling request") // carries request_id
 	log.InfoContext(ctx, "handling request")      // carries request_id too
 }
+
+// callerSkipAdapter mirrors the README's Adapters section: a wrapper that
+// implements some other logging interface on top of Logger.
+type callerSkipAdapter struct{ log logger.Logger }
+
+func newCallerSkipAdapter(log logger.Logger) *callerSkipAdapter {
+	if s, ok := log.(logger.CallerSkipper); ok {
+		log = s.WithCallerSkip(1) // one frame: the adapter's own method
+	}
+	return &callerSkipAdapter{log: log}
+}
+
+func (a *callerSkipAdapter) Info(msg string, args ...any) { a.log.Info(msg, args...) }
+
+// Example_callerSkip mirrors the README's Adapters section. The record it
+// emits is attributed to this function, not to callerSkipAdapter.Info.
+func Example_callerSkip() {
+	log := logger.New(logger.Config{Format: logger.FormatJSON})
+
+	newCallerSkipAdapter(log).Info("attributed to the caller of the adapter")
+}
