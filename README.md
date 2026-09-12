@@ -52,6 +52,43 @@ log := logger.New(logger.Config{
 
 If you need the old total-bypass behavior — a hand-built chain that must not be redecorated — use `Config.PipelineOverride` instead. It bypasses the handler-decoration pipeline only: `Sink`/`Handler`, `FilterRules`, `GlobalFields`, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook`, `Writer`, `Format` and `Level` are all ignored, and `Config.Validate()` (also reachable through `NewWithError`) reports an error naming each one that was set. Logger-level behavior outside that chain is unaffected — `RateLimit`, `ContextFields` and the outer `ContextHandler` still apply.
 
+## Global fields
+
+`Config.GlobalFields` attaches a fixed set of fields to every record, in
+sorted key order, so two replicas built from the same config emit the same
+line shape. When a record already carries one of those keys, the global
+value **replaces** the record's attribute in place: the line never contains
+the same key twice, so a JSON shipper never has to guess which value wins.
+
+```go
+log := logger.New(logger.Config{
+    Format:       logger.FormatJSON,
+    GlobalFields: map[string]string{"env": "prod", "service": "checkout"},
+})
+
+log.Info("config reloaded", "env", "canary")
+// {"time":"...","level":"INFO","msg":"config reloaded","env":"prod","component":{...},"service":"checkout"}
+```
+
+Global fields always stay at the top level. Record attributes, and anything
+added with `WithAttrs` after a `WithGroup`, nest under the open groups exactly
+as they would with a bare `slog` handler. The same handler is available on its
+own for hand-built chains:
+
+```go
+h := handler.NewGlobalFieldsHandler(slog.NewJSONHandler(os.Stdout, nil),
+    map[string]string{"env": "prod"}, true)
+
+slog.New(h).WithGroup("request").Info("handled", "method", "GET")
+// {"time":"...","level":"INFO","msg":"handled","env":"prod","request":{"method":"GET"}}
+```
+
+One limit to know about: attributes attached with `logger.With(...)` before
+any `WithGroup` are handed to the sink to pre-format, as `slog` intends, so
+they are not visible to the replacement check. A `With("env", "canary")` on a
+logger whose global fields also set `env` is left as the sink formats it.
+Global fields override record attributes, not `With` attributes.
+
 ## Filtering
 
 `Config.FilterRules` matches a key (case-insensitive) and, optionally, an

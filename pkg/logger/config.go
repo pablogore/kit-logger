@@ -57,6 +57,12 @@ type Config struct {
 	//
 	// Deprecated: set Format directly; do not combine it with FormatString.
 	FormatString string
+
+	// GlobalFields are attached to every record, in sorted key order. A
+	// global field replaces a record attribute with the same key, so a
+	// record never reaches the sink carrying that key twice. Attributes
+	// attached through With/WithAttrs are delegated to the sink and are not
+	// inspected; see handler.GlobalFieldsHandler for the full semantics.
 	GlobalFields map[string]string
 
 	// Sink is the terminal handler that receives fully decorated records:

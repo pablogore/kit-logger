@@ -1,7 +1,11 @@
 package logger_test
 
 import (
+	"log/slog"
+	"os"
+
 	"github.com/pablogore/kit-logger/pkg/logger"
+	"github.com/pablogore/kit-logger/pkg/logger/handler"
 )
 
 // Example_basicUsage mirrors the README's Basic Usage section. It has no
@@ -34,4 +38,23 @@ func Example_structuredLogging() {
 	})
 
 	log.Info("user login", "user_id", "123", "ip", "192.168.1.1")
+}
+
+// Example_globalFields mirrors the README's Global fields section: a global
+// field replaces a colliding record attribute instead of being emitted next
+// to it, and the handler is usable on its own around a bare slog handler,
+// where record attrs nest under WithGroup while the global fields stay at
+// the top level.
+func Example_globalFields() {
+	log := logger.New(logger.Config{
+		Format:       logger.FormatJSON,
+		GlobalFields: map[string]string{"env": "prod", "service": "checkout"},
+	})
+
+	log.Info("config reloaded", "env", "canary")
+
+	h := handler.NewGlobalFieldsHandler(slog.NewJSONHandler(os.Stdout, nil),
+		map[string]string{"env": "prod"}, true)
+
+	slog.New(h).WithGroup("request").Info("handled", "method", "GET")
 }
