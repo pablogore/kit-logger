@@ -11,6 +11,7 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -72,6 +73,10 @@ type Options struct {
 	// MetadataKeys are the incoming metadata keys checked for a correlation
 	// ID, and the outgoing key a client interceptor writes one under. Empty
 	// means DefaultMetadataKeys.
+	//
+	// The slice is copied when the interceptor is built: mutating it, or
+	// mutating DefaultMetadataKeys itself, afterward has no effect on an
+	// interceptor already constructed from it.
 	MetadataKeys []string
 
 	// DisablePanicRecovery stops a server interceptor from converting a
@@ -142,6 +147,10 @@ func resolve(opts Options) resolved {
 	if len(keys) == 0 {
 		keys = DefaultMetadataKeys
 	}
+	// Snapshot: neither a caller mutating the slice it passed in, nor a
+	// caller mutating the exported DefaultMetadataKeys, may retroactively
+	// change an interceptor already built from it.
+	keys = append([]string(nil), keys...)
 
 	skip := make(map[string]struct{}, len(opts.SkipMethods))
 	for _, m := range opts.SkipMethods {
@@ -408,35 +417,81 @@ func UnaryClientInterceptor(opts Options) grpc.UnaryClientInterceptor {
 }
 
 // wrappedClientStream counts messages the caller actually sends and receives
-// and logs the summary line exactly once, the first time RecvMsg reports the
-// stream is over (io.EOF on a clean end, any other error otherwise).
+// and logs the summary line exactly once, the first time any of these
+// signals the stream is over:
+//
+//   - RecvMsg returns a terminal error (io.EOF on a clean end, any other
+//     error otherwise);
+//   - RecvMsg succeeds on a stream whose ServiceDesc declares ServerStreams
+//     false, i.e. a client-streaming call where the server sends exactly one
+//     response -- receiving it IS the end of the stream, and nothing else
+//     will ever call RecvMsg again to observe an EOF;
+//   - SendMsg or CloseSend returns an error;
+//   - the call's context is done (cancelled or past its deadline) before any
+//     of the above happened.
 //
 // A client stream has no explicit "close" callback to hook, unlike a server
-// stream whose handler returns -- RecvMsg reporting a terminal error is the
-// only reliable end-of-stream signal available on this side.
+// stream whose handler returns, so these are the only reliable end-of-stream
+// signals available on this side. A successful CloseSend alone is NOT one of
+// them: the caller may still be waiting on one or more responses.
 type wrappedClientStream struct {
 	grpc.ClientStream
-	once     sync.Once
-	logEnd   func(err error)
-	recvMsgs atomic.Int64
-	sentMsgs atomic.Int64
+	serverStreams bool
+	once          sync.Once
+	done          chan struct{}
+	logEnd        func(err error)
+	recvMsgs      atomic.Int64
+	sentMsgs      atomic.Int64
+}
+
+// watchContext starts the goroutine that finalizes the stream if ctx is done
+// before any other signal did. It exits promptly once finalize runs through
+// any path, so a stream that ends normally never leaks this goroutine.
+func (w *wrappedClientStream) watchContext(ctx context.Context) {
+	go func() {
+		select {
+		case <-ctx.Done():
+			w.finalize(ctx.Err())
+		case <-w.done:
+		}
+	}()
+}
+
+func (w *wrappedClientStream) finalize(err error) {
+	w.once.Do(func() {
+		w.logEnd(err)
+		close(w.done)
+	})
 }
 
 func (w *wrappedClientStream) SendMsg(m any) error {
 	err := w.ClientStream.SendMsg(m)
-	if err == nil {
-		w.sentMsgs.Add(1)
+	if err != nil {
+		w.finalize(err)
+		return err
 	}
-	return err
+	w.sentMsgs.Add(1)
+	return nil
 }
 
 func (w *wrappedClientStream) RecvMsg(m any) error {
 	err := w.ClientStream.RecvMsg(m)
-	if err == nil {
-		w.recvMsgs.Add(1)
-		return nil
+	if err != nil {
+		w.finalize(err)
+		return err
 	}
-	w.once.Do(func() { w.logEnd(err) })
+	w.recvMsgs.Add(1)
+	if !w.serverStreams {
+		w.finalize(nil)
+	}
+	return nil
+}
+
+func (w *wrappedClientStream) CloseSend() error {
+	err := w.ClientStream.CloseSend()
+	if err != nil {
+		w.finalize(err)
+	}
 	return err
 }
 
@@ -478,13 +533,25 @@ func StreamClientInterceptor(opts Options) grpc.StreamClientInterceptor {
 			return cs, err
 		}
 
-		wrapped := &wrappedClientStream{ClientStream: cs}
+		wrapped := &wrappedClientStream{
+			ClientStream:  cs,
+			serverStreams: desc.ServerStreams,
+			done:          make(chan struct{}),
+		}
 		wrapped.logEnd = func(streamErr error) {
 			code := codes.OK
 			errMsg := ""
-			if streamErr != nil && streamErr != io.EOF {
-				st := status.Convert(streamErr)
-				code = st.Code()
+			switch {
+			case streamErr == nil || streamErr == io.EOF:
+				// Clean end: OK.
+			case errors.Is(streamErr, context.Canceled), errors.Is(streamErr, context.DeadlineExceeded):
+				// status.Convert would report these as codes.Unknown since
+				// a bare context error carries no GRPCStatus(); FromContextError
+				// is the one that maps them to their matching code.
+				code = status.FromContextError(streamErr).Code()
+				errMsg = streamErr.Error()
+			default:
+				code = status.Convert(streamErr).Code()
 				errMsg = streamErr.Error()
 			}
 
@@ -503,6 +570,7 @@ func StreamClientInterceptor(opts Options) grpc.StreamClientInterceptor {
 			}
 			logger(log).Log(ctx, r.levelFor(code), "grpc_call", fields...)
 		}
+		wrapped.watchContext(ctx)
 		return wrapped, nil
 	}
 }

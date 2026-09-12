@@ -292,6 +292,14 @@ func TestIntegration_ClientStream_CountsReceived(t *testing.T) {
 
 	entry := serverEntry(t, h.log, "grpc_call")
 	assert.Equal(t, int64(3), argValue(t, entry.Args, "msg_received"))
+
+	// The client never calls RecvMsg a second time to observe an EOF on this
+	// client-streaming RPC -- the single successful receive above must have
+	// been enough, on its own, to finalize and log the client-side line too.
+	clientLine := clientEntry(t, h.log, "grpc_call")
+	assert.Equal(t, codes.OK.String(), argValue(t, clientLine.Args, "code"))
+	assert.Equal(t, int64(3), argValue(t, clientLine.Args, "msg_sent"))
+	assert.Equal(t, int64(1), argValue(t, clientLine.Args, "msg_received"))
 }
 
 func TestIntegration_Bidi_ConcurrentSendRecv(t *testing.T) {

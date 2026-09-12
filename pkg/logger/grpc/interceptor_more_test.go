@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
 	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 	"github.com/pablogore/kit-logger/pkg/logger/kitlogtest"
@@ -46,6 +48,22 @@ func serverEntry(t *testing.T, log *kitlogtest.MockLogger, msg string) kitlogtes
 		}
 	}
 	require.NotNil(t, found, "no server-side entry logged for %q", msg)
+	return *found
+}
+
+// clientEntry is serverEntry's counterpart: it isolates the client-side
+// interceptor's own log line among entries sharing the same message name,
+// since only a server-side entry carries "peer".
+func clientEntry(t *testing.T, log *kitlogtest.MockLogger, msg string) kitlogtest.LogEntry {
+	t.Helper()
+	var found *kitlogtest.LogEntry
+	for i := range log.Entries {
+		if log.Entries[i].Message == msg && !hasArg(log.Entries[i].Args, "peer") {
+			e := log.Entries[i]
+			found = &e
+		}
+	}
+	require.NotNil(t, found, "no client-side entry logged for %q", msg)
 	return *found
 }
 
@@ -417,15 +435,20 @@ func TestUnaryClientInterceptor_ErrorLogsCodeAndMessage(t *testing.T) {
 // --- StreamClientInterceptor ----------------------------------------------
 
 type fakeClientStream struct {
-	recv []any
-	sent []any
+	recv         []any
+	sent         []any
+	sendErr      error
+	closeSendErr error
 }
 
 func (f *fakeClientStream) Header() (metadata.MD, error) { return nil, nil }
 func (f *fakeClientStream) Trailer() metadata.MD         { return nil }
-func (f *fakeClientStream) CloseSend() error             { return nil }
+func (f *fakeClientStream) CloseSend() error             { return f.closeSendErr }
 func (f *fakeClientStream) Context() context.Context     { return context.Background() }
 func (f *fakeClientStream) SendMsg(m any) error {
+	if f.sendErr != nil {
+		return f.sendErr
+	}
 	f.sent = append(f.sent, m)
 	return nil
 }
@@ -437,6 +460,19 @@ func (f *fakeClientStream) RecvMsg(m any) error {
 	return nil
 }
 
+// blockingClientStream never resolves RecvMsg/SendMsg on its own; it exists
+// to prove the ctx.Done() watcher, not RecvMsg, is what finalizes a stream
+// whose caller stops driving it.
+type blockingClientStream struct {
+	fakeClientStream
+	block chan struct{}
+}
+
+func (f *blockingClientStream) RecvMsg(m any) error {
+	<-f.block
+	return io.EOF
+}
+
 func TestStreamClientInterceptor_CountsMessagesAndLogsOnceOnEOF(t *testing.T) {
 	log := kitlogtest.NewMockLogger()
 	interceptor := StreamClientInterceptor(Options{Logger: log})
@@ -446,7 +482,7 @@ func TestStreamClientInterceptor_CountsMessagesAndLogsOnceOnEOF(t *testing.T) {
 		return fake, nil
 	}
 
-	cs, err := interceptor(context.Background(), &grpc.StreamDesc{}, nil, "/test.Service/Stream", streamer)
+	cs, err := interceptor(context.Background(), &grpc.StreamDesc{ServerStreams: true}, nil, "/test.Service/Stream", streamer)
 	require.NoError(t, err)
 
 	require.NoError(t, cs.SendMsg("a"))
@@ -507,6 +543,176 @@ func TestStreamClientInterceptor_NonEOFRecvErrorLogsThatCode(t *testing.T) {
 	entry := lastEntry(t, log, "grpc_call")
 	assert.Equal(t, codes.Canceled.String(), argValue(t, entry.Args, "code"))
 	assert.Equal(t, slog.LevelWarn, entry.Level)
+}
+
+// TestStreamClientInterceptor_ClientStreamingSingleResponseLogsOnSuccess
+// covers the exact gap the review flagged: a client-streaming RPC
+// (ServerStreams: false) where the caller sends its messages, closes the
+// send side, and receives exactly one successful response -- never calling
+// RecvMsg again to observe an EOF. That single successful receive must be
+// treated as terminal, or the call goes unlogged forever.
+func TestStreamClientInterceptor_ClientStreamingSingleResponseLogsOnSuccess(t *testing.T) {
+	log := kitlogtest.NewMockLogger()
+	interceptor := StreamClientInterceptor(Options{Logger: log})
+
+	fake := &fakeClientStream{recv: []any{"the one response"}}
+	streamer := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return fake, nil
+	}
+
+	cs, err := interceptor(context.Background(), &grpc.StreamDesc{ServerStreams: false}, nil, "/test.Service/ClientStream", streamer)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.SendMsg("a"))
+	require.NoError(t, cs.SendMsg("b"))
+	require.NoError(t, cs.CloseSend())
+	require.NoError(t, cs.RecvMsg(new(any)))
+
+	entry := lastEntry(t, log, "grpc_call")
+	assert.Equal(t, codes.OK.String(), argValue(t, entry.Args, "code"))
+	assert.Equal(t, int64(2), argValue(t, entry.Args, "msg_sent"))
+	assert.Equal(t, int64(1), argValue(t, entry.Args, "msg_received"))
+}
+
+func TestStreamClientInterceptor_SendMsgErrorFinalizes(t *testing.T) {
+	log := kitlogtest.NewMockLogger()
+	interceptor := StreamClientInterceptor(Options{Logger: log})
+
+	sendErr := status.Error(codes.Unavailable, "broken pipe")
+	fake := &fakeClientStream{sendErr: sendErr}
+	streamer := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return fake, nil
+	}
+
+	cs, err := interceptor(context.Background(), &grpc.StreamDesc{ServerStreams: true}, nil, "/test.Service/Stream", streamer)
+	require.NoError(t, err)
+
+	require.ErrorIs(t, cs.SendMsg("a"), sendErr)
+	// A further RecvMsg after the stream already finalized must not add a
+	// second log line.
+	_ = cs.RecvMsg(new(any))
+
+	entries := 0
+	for _, e := range log.Entries {
+		if e.Message == "grpc_call" {
+			entries++
+		}
+	}
+	assert.Equal(t, 1, entries)
+
+	entry := lastEntry(t, log, "grpc_call")
+	assert.Equal(t, codes.Unavailable.String(), argValue(t, entry.Args, "code"))
+}
+
+func TestStreamClientInterceptor_CloseSendErrorFinalizes(t *testing.T) {
+	log := kitlogtest.NewMockLogger()
+	interceptor := StreamClientInterceptor(Options{Logger: log})
+
+	closeErr := status.Error(codes.Internal, "close failed")
+	fake := &fakeClientStream{closeSendErr: closeErr}
+	streamer := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return fake, nil
+	}
+
+	cs, err := interceptor(context.Background(), &grpc.StreamDesc{ServerStreams: false}, nil, "/test.Service/ClientStream", streamer)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.SendMsg("a"))
+	require.ErrorIs(t, cs.CloseSend(), closeErr)
+
+	entry := lastEntry(t, log, "grpc_call")
+	assert.Equal(t, codes.Internal.String(), argValue(t, entry.Args, "code"))
+}
+
+// TestStreamClientInterceptor_SuccessfulCloseSendAloneDoesNotFinalize proves
+// a clean CloseSend on a stream still awaiting a response is not, by itself,
+// grounds to log: the caller may still be waiting on data.
+func TestStreamClientInterceptor_SuccessfulCloseSendAloneDoesNotFinalize(t *testing.T) {
+	log := kitlogtest.NewMockLogger()
+	interceptor := StreamClientInterceptor(Options{Logger: log})
+
+	fake := &fakeClientStream{recv: []any{"resp"}}
+	streamer := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return fake, nil
+	}
+
+	cs, err := interceptor(context.Background(), &grpc.StreamDesc{ServerStreams: true}, nil, "/test.Service/Bidi", streamer)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.SendMsg("a"))
+	require.NoError(t, cs.CloseSend())
+
+	assert.False(t, log.HasMessage("grpc_call"), "a successful CloseSend alone must not finalize a still-open, server-streaming call")
+
+	require.NoError(t, cs.RecvMsg(new(any)))
+	require.ErrorIs(t, cs.RecvMsg(new(any)), io.EOF)
+	assert.True(t, log.HasMessage("grpc_call"))
+}
+
+// TestStreamClientInterceptor_ContextCancellationFinalizes proves a caller
+// that abandons a stream (stops calling RecvMsg entirely, e.g. after its
+// context is cancelled) still gets exactly one "grpc_call" line, instead of
+// none.
+func TestStreamClientInterceptor_ContextCancellationFinalizes(t *testing.T) {
+	log := kitlogtest.NewMockLogger()
+	interceptor := StreamClientInterceptor(Options{Logger: log})
+
+	fake := &blockingClientStream{block: make(chan struct{})}
+	t.Cleanup(func() { close(fake.block) })
+	streamer := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return fake, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cs, err := interceptor(ctx, &grpc.StreamDesc{ServerStreams: true}, nil, "/test.Service/Bidi", streamer)
+	require.NoError(t, err)
+	_ = cs
+
+	cancel()
+
+	require.Eventually(t, func() bool {
+		return log.HasMessage("grpc_call")
+	}, time.Second, 10*time.Millisecond, "context cancellation must eventually finalize the stream's log line")
+
+	entry := lastEntry(t, log, "grpc_call")
+	assert.Equal(t, codes.Canceled.String(), argValue(t, entry.Args, "code"))
+}
+
+// TestStreamClientInterceptor_ExactlyOnceUnderConcurrentFinalizers races a
+// RecvMsg error against context cancellation to prove the sync.Once guard
+// holds even when two independent finalize triggers fire close together.
+func TestStreamClientInterceptor_ExactlyOnceUnderConcurrentFinalizers(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		log := kitlogtest.NewMockLogger()
+		interceptor := StreamClientInterceptor(Options{Logger: log})
+
+		fake := &recvErrClientStream{err: io.EOF}
+		streamer := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			return fake, nil
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cs, err := interceptor(ctx, &grpc.StreamDesc{ServerStreams: true}, nil, "/test.Service/Bidi", streamer)
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); cancel() }()
+		go func() { defer wg.Done(); _ = cs.RecvMsg(new(any)) }()
+		wg.Wait()
+
+		require.Eventually(t, func() bool {
+			return log.HasMessage("grpc_call")
+		}, time.Second, 10*time.Millisecond)
+
+		entries := 0
+		for _, e := range log.Entries {
+			if e.Message == "grpc_call" {
+				entries++
+			}
+		}
+		assert.Equal(t, 1, entries)
+	}
 }
 
 type recvErrClientStream struct {
