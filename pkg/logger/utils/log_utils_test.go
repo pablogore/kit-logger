@@ -34,3 +34,38 @@ func TestExtractAttrs_ReturnsAllAttributes(t *testing.T) {
 	require.Equal(t, true, attrs["active"])
 	require.Len(t, attrs, 3)
 }
+
+// TestExtractAttrList_PreservesOrderAndDuplicates tests that ExtractAttrList
+// returns attributes in insertion order and does not collapse repeated keys,
+// which is what makes it usable for uniqueness assertions.
+func TestExtractAttrList_PreservesOrderAndDuplicates(t *testing.T) {
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "test message", 0)
+	record.AddAttrs(
+		slog.String("env", "production"),
+		slog.String("method", "GET"),
+		slog.String("env", "staging"),
+	)
+
+	attrs := utils.ExtractAttrList(record)
+
+	require.Len(t, attrs, 3)
+	require.Equal(t, "env", attrs[0].Key)
+	require.Equal(t, "production", attrs[0].Value.String())
+	require.Equal(t, "method", attrs[1].Key)
+	require.Equal(t, "env", attrs[2].Key)
+	require.Equal(t, "staging", attrs[2].Value.String())
+
+	// The map view collapses the same record to two keys, last write wins.
+	require.Len(t, utils.ExtractAttrs(record), 2)
+}
+
+// TestExtractAttrList_EmptyRecord tests that a record with no attributes
+// yields an empty, non-nil slice.
+func TestExtractAttrList_EmptyRecord(t *testing.T) {
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "test message", 0)
+
+	attrs := utils.ExtractAttrList(record)
+
+	require.NotNil(t, attrs)
+	require.Empty(t, attrs)
+}
