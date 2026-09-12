@@ -76,9 +76,9 @@ deps: ## Install dependencies
 example: ## Run the basic logging example
 	go test -run '^Example_basicUsage$$' -v ./pkg/logger/
 
-# Run every Example function (see pkg/logger/example_test.go)
+# Run every Example function (pkg/logger/example_test.go and each subpackage's example_test.go)
 examples: ## Run all examples
-	go test -run '^Example' -v ./pkg/logger/
+	go test -run '^Example' -v ./...
 
 # Check for security vulnerabilities
 security: ## Check for security vulnerabilities
