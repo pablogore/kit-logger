@@ -270,7 +270,10 @@ import (
     "google.golang.org/grpc"
 )
 
-grpcServer := grpc.NewServer(grpc.UnaryInterceptor(kitgrpc.UnaryLoggingInterceptor()))
+grpcServer := grpc.NewServer(
+    grpc.UnaryInterceptor(kitgrpc.UnaryServerInterceptor(kitgrpc.Options{Logger: log})),
+    grpc.StreamInterceptor(kitgrpc.StreamServerInterceptor(kitgrpc.Options{Logger: log})),
+)
 
 var handler http.Handler = httpmw.New(httpmw.Options{Logger: log})(next)
 ```
@@ -287,6 +290,56 @@ mw := httpmw.New(httpmw.Options{
     SkipPaths: []string{"/healthz"}, // served and un-logged
 })
 ```
+
+### gRPC interceptors
+
+`kitgrpc.UnaryServerInterceptor`, `StreamServerInterceptor`,
+`UnaryClientInterceptor` and `StreamClientInterceptor` each log one
+`grpc_call` line per call, mapping the status code to a level instead of
+always logging at Info: `OK` is Info, the codes that describe a caller or
+environment problem (`NotFound`, `InvalidArgument`, `Unavailable`, ...) are
+Warn, everything else — including a non-status error, and a recovered panic
+— is Error.
+
+```go
+opts := kitgrpc.Options{
+    Logger:      log,                                 // nil falls back to logger.L()
+    SkipMethods: []string{"/grpc.health.v1.Health/Check"},
+}
+
+grpcServer := grpc.NewServer(
+    grpc.UnaryInterceptor(kitgrpc.UnaryServerInterceptor(opts)),
+    grpc.StreamInterceptor(kitgrpc.StreamServerInterceptor(opts)),
+)
+
+conn, err := grpc.NewClient(target,
+    grpc.WithChainUnaryInterceptor(kitgrpc.UnaryClientInterceptor(opts)),
+    grpc.WithChainStreamInterceptor(kitgrpc.StreamClientInterceptor(opts)),
+)
+```
+
+A correlation ID read from incoming `x-request-id`/`x-correlation-id`
+metadata (configurable via `Options.MetadataKeys`) is attached to the
+context a server interceptor hands the handler — retrieve it with
+`kitgrpc.RequestIDFrom(ctx)` — and rides along automatically on any outbound
+call the handler makes through a client interceptor from this package, the
+same end-to-end correlation `httpmw` gives an HTTP request.
+
+grpc-go does not recover a panicking handler on its own; left unhandled, one
+panicking RPC takes down every other call the process is serving. Both
+server interceptors recover by default and respond with `codes.Internal`
+after logging the panic and its stack — set `Options.DisablePanicRecovery`
+to log and re-panic instead.
+
+Request and response payloads are never logged unless `Options.LogPayloads`
+is set: they routinely carry PII, credentials or bodies too large for a log
+line, so this is opt-in rather than a default a caller has to remember to
+turn off. It only applies to the unary interceptors — streaming payloads are
+never logged by this package.
+
+`UnaryLoggingInterceptor()` remains as `UnaryServerInterceptor(Options{})`
+for source compatibility; existing callers gain panic recovery and
+status-derived levels along with it.
 
 **The response writer keeps its optional interfaces.** A wrapper that embeds the
 `http.ResponseWriter` *interface* promotes only `Header`, `Write` and
