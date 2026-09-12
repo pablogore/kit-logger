@@ -24,3 +24,14 @@ type Logger interface {
 	Sync() error
 	Slog() *slog.Logger
 }
+
+// CallerSkipper is implemented by loggers that can attribute records to a
+// frame further up the stack than their direct caller. Adapters that wrap a
+// Logger behind another logging interface use it so records name the real
+// call site instead of the adapter; see SlogLogger.WithCallerSkip.
+//
+// It is an optional interface rather than a Logger method so that existing
+// Logger implementations keep compiling; consumers assert for it.
+type CallerSkipper interface {
+	WithCallerSkip(n int) Logger
+}
