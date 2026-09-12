@@ -62,18 +62,18 @@ func (h *gateHandler) drain() []slog.Record {
 	}
 }
 
-// componentGroup is the flattened "component" group added by ComponentHandler.
-type componentGroup struct {
+// sourceGroup is the flattened "source" group added by SourceHandler.
+type sourceGroup struct {
 	found bool
 	file  string
 	line  int
 	fn    string
 }
 
-func componentGroupOf(record slog.Record) componentGroup {
-	var got componentGroup
+func sourceGroupOf(record slog.Record) sourceGroup {
+	var got sourceGroup
 	record.Attrs(func(a slog.Attr) bool {
-		if a.Key != "component" {
+		if a.Key != slog.SourceKey {
 			return true
 		}
 		got.found = true
@@ -83,7 +83,7 @@ func componentGroupOf(record slog.Record) componentGroup {
 				got.file = attr.Value.String()
 			case "line":
 				got.line = int(attr.Value.Int64())
-			case "func":
+			case "function":
 				got.fn = attr.Value.String()
 			}
 		}
@@ -99,7 +99,7 @@ func newFacade(t *testing.T, bufferSize int) (Logger, *gateHandler, func()) {
 	t.Helper()
 
 	sink := newGateHandler()
-	log := New(Config{Level: LevelDebug, Sink: sink, BufferSize: bufferSize})
+	log := New(Config{Level: LevelDebug, Sink: sink, BufferSize: bufferSize, AddSource: true})
 
 	flush := func() {}
 	if bufferSize > 0 {
@@ -209,11 +209,11 @@ func TestSlogLogger_AttributesTheConsumerCallSite(t *testing.T) {
 
 				records := sink.drain()
 				require.Len(t, records, 1)
-				got := componentGroupOf(records[0])
-				require.True(t, got.found, "component group not found")
+				got := sourceGroupOf(records[0])
+				require.True(t, got.found, "source group not found")
 				assert.Equal(t, thisFile, got.file)
 				assert.Equal(t, expectedLine, got.line)
-				for _, forbidden := range []string{"slog.", "kit-logger", "ComponentHandler", "SlogLogger"} {
+				for _, forbidden := range []string{"slog.", "kit-logger", "SourceHandler", "SlogLogger"} {
 					assert.NotContains(t, got.fn, forbidden)
 				}
 			})
@@ -237,9 +237,9 @@ func TestSlogLogger_AttributionIdenticalAcrossBufferSizes(t *testing.T) {
 	require.Len(t, syncRecords, 1)
 	require.Len(t, bufferedRecords, 1)
 
-	got := componentGroupOf(syncRecords[0])
-	require.True(t, got.found, "component group not found")
-	assert.Equal(t, got, componentGroupOf(bufferedRecords[0]))
+	got := sourceGroupOf(syncRecords[0])
+	require.True(t, got.found, "source group not found")
+	assert.Equal(t, got, sourceGroupOf(bufferedRecords[0]))
 }
 
 // TestSlogLogger_WithCarriesBakedAttrs proves that emitting through the
@@ -292,12 +292,12 @@ func TestSlogLogger_ArgsNormalizationMatchesSlog(t *testing.T) {
 	}
 }
 
-// attrStrings renders a record's attrs, skipping the component group, whose
+// attrStrings renders a record's attrs, skipping the source group, whose
 // line legitimately differs between the two emit paths.
 func attrStrings(record slog.Record) []string {
 	var out []string
 	record.Attrs(func(a slog.Attr) bool {
-		if a.Key == "component" {
+		if a.Key == slog.SourceKey {
 			return true
 		}
 		out = append(out, a.Key+"="+a.Value.String())
@@ -379,8 +379,8 @@ func TestSlogLogger_NilContextIsTolerated(t *testing.T) {
 
 			records := sink.drain()
 			require.Len(t, records, 1)
-			got := componentGroupOf(records[0])
-			require.True(t, got.found, "component group not found")
+			got := sourceGroupOf(records[0])
+			require.True(t, got.found, "source group not found")
 			assert.Equal(t, thisFile, got.file)
 			assert.Equal(t, expectedLine, got.line)
 		})

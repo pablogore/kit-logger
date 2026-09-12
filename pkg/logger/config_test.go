@@ -510,15 +510,26 @@ func TestConfig_Sink_IsDecoratedLikeTheDefaultHandler(t *testing.T) {
 		assert.Equal(t, "svc", v)
 	})
 
-	t.Run("component attribution is added", func(t *testing.T) {
+	t.Run("source attribution is added when AddSource is set", func(t *testing.T) {
+		cap := newCapturingHandler()
+		logger := New(Config{Sink: cap, AddSource: true})
+		logger.Info("hi")
+
+		entries := cap.getEntries()
+		require.Len(t, entries, 1)
+		_, ok := argValue(entries[0].Args, slog.SourceKey)
+		assert.True(t, ok, "Sink must receive source attribution like the default handler")
+	})
+
+	t.Run("source attribution is off by default", func(t *testing.T) {
 		cap := newCapturingHandler()
 		logger := New(Config{Sink: cap})
 		logger.Info("hi")
 
 		entries := cap.getEntries()
 		require.Len(t, entries, 1)
-		_, ok := argValue(entries[0].Args, "component")
-		assert.True(t, ok, "Sink must receive component attribution like the default handler")
+		_, ok := argValue(entries[0].Args, slog.SourceKey)
+		assert.False(t, ok, "source attribution is opt-in; three fields per line is noise by default")
 	})
 
 	t.Run("Sampling is applied", func(t *testing.T) {
