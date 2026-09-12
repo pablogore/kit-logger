@@ -63,11 +63,16 @@ type Config struct {
 	// bypass behavior.
 	Handler slog.Handler
 
-	// PipelineOverride replaces the entire pipeline verbatim, exactly as
-	// Handler used to: every other field in this Config is ignored, and
-	// Validate reports that as an error naming the ignored fields. This is the
-	// escape hatch for a caller that must not have its chain decorated, e.g.
-	// one that already assembled its own Filter/Sampling/Buffer stack.
+	// PipelineOverride replaces the handler-decoration pipeline verbatim,
+	// exactly as Handler used to: Sink/Handler, FilterRules, GlobalFields,
+	// Sampling, BufferSize, Hook, Writer, Format and Level are all ignored,
+	// and Validate reports each one that was set as an error naming it. This
+	// is the escape hatch for a caller that must not have its chain
+	// decorated, e.g. one that already assembled its own Filter/Sampling/
+	// Buffer stack.
+	//
+	// Logger-level behavior that lives outside that chain is unaffected:
+	// RateLimit, ContextFields and the outer ContextHandler still apply.
 	PipelineOverride slog.Handler
 
 	Hook      func(ctx context.Context, r slog.Record) (context.Context, bool)
@@ -390,20 +395,19 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher) {
 	h = handler.NewComponentHandler(h)
 
 	if cfg.Sampling.Enabled {
-		sampler, err := handler.NewSamplingHandlerWithError(h, handler.SamplingConfig{
+		// decorate performs no I/O of its own -- reporting an invalid
+		// Config is Validate's job alone, surfaced through NewWithError.
+		// SamplingConfig.Validate checks exactly the fields passed here, so
+		// Config.Validate already reports the identical problem; the
+		// error-swallowing constructor just applies the same clamped,
+		// emitting-safe defaults without a second, redundant report.
+		h = handler.NewSamplingHandler(h, handler.SamplingConfig{
 			Interval:    cfg.Sampling.Interval,
 			Probability: cfg.Sampling.Probability,
 			MinLevel:    parseLevel(cfg.Sampling.MinLevel),
 			KeyFunc:     cfg.Sampling.KeyFunc,
 			MaxKeys:     cfg.Sampling.MaxKeys,
 		})
-		if err != nil {
-			// Report loudly rather than silently reinterpreting the
-			// configuration. The handler is still usable: invalid values
-			// were clamped to emitting defaults, so no record is lost.
-			fmt.Fprintf(os.Stderr, "kit-logger: invalid sampling configuration, using emitting defaults: %v\n", err)
-		}
-		h = sampler
 	}
 
 	h = handler.NewPrometheusHandler(h)
