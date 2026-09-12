@@ -337,6 +337,25 @@ line, so this is opt-in rather than a default a caller has to remember to
 turn off. It only applies to the unary interceptors — streaming payloads are
 never logged by this package.
 
+**`StreamClientInterceptor` logs exactly once per stream, as soon as any of
+these says the stream is over** — a client stream has no explicit "close"
+callback to hook, unlike a server stream whose handler simply returns:
+
+- `RecvMsg` returns a terminal error (`io.EOF` on a clean end, anything else
+  otherwise);
+- `RecvMsg` succeeds on a call whose `StreamDesc.ServerStreams` is `false` —
+  a client-streaming RPC where the server sends exactly one response, so
+  receiving it successfully *is* the end of the stream and nothing else will
+  ever call `RecvMsg` again to observe an EOF;
+- `SendMsg` or `CloseSend` returns an error;
+- the call's `context.Context` is done (cancelled or past its deadline)
+  before any of the above happened, so a caller that abandons a
+  server-streaming or bidi stream mid-flight still gets a log line instead
+  of none.
+
+A successful `CloseSend` alone never finalizes: the caller may still be
+waiting on one or more responses.
+
 `UnaryLoggingInterceptor()` remains as `UnaryServerInterceptor(Options{})`
 for source compatibility; existing callers gain panic recovery and
 status-derived levels along with it.
