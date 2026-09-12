@@ -69,17 +69,20 @@ func NewLogger(options ...func(*Config)) Logger {
 	return New(cfg)
 }
 
-// WithLevel sets the log level
+// WithLevel sets the log level by name, delegating to ParseLevel through
+// Config's deprecated LevelString bridge -- a typo surfaces as a Validate
+// error instead of silently falling back to info.
 func WithLevel(level string) func(*Config) {
 	return func(cfg *Config) {
-		cfg.Level = level
+		cfg.LevelString = level
 	}
 }
 
-// WithEncoding sets the log encoding
+// WithEncoding sets the log encoding by name, delegating to ParseFormat
+// through Config's deprecated FormatString bridge -- see WithLevel.
 func WithEncoding(encoding string) func(*Config) {
 	return func(cfg *Config) {
-		cfg.Format = encoding
+		cfg.FormatString = encoding
 	}
 }
 

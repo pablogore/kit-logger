@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestString(t *testing.T) {
@@ -157,14 +158,22 @@ func TestWithLevel(t *testing.T) {
 	option := WithLevel("error")
 	cfg := Config{}
 	option(&cfg)
-	assert.Equal(t, "error", cfg.Level)
+	assert.Equal(t, "error", cfg.LevelString)
+
+	resolved, err := resolveLevel("Level", cfg.Level, cfg.LevelString)
+	require.NoError(t, err)
+	assert.Equal(t, LevelError, resolved)
 }
 
 func TestWithEncoding(t *testing.T) {
 	option := WithEncoding("json")
 	cfg := Config{}
 	option(&cfg)
-	assert.Equal(t, "json", cfg.Format)
+	assert.Equal(t, "json", cfg.FormatString)
+
+	resolved, err := resolveFormat("Format", cfg.Format, cfg.FormatString)
+	require.NoError(t, err)
+	assert.Equal(t, FormatJSON, resolved)
 }
 
 func TestWithService_FirstTime(t *testing.T) {

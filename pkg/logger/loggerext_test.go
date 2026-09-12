@@ -33,7 +33,7 @@ func (s *stubLogger) Slog() *slog.Logger                              { return s
 
 func TestExitWithFlush_WithFlusher(t *testing.T) {
 	// Create a logger that implements Sync
-	logger := New(Config{Level: "info"})
+	logger := New(Config{Level: LevelInfo})
 	SetGlobal(logger)
 
 	// Test that the function can be called without panic
@@ -64,7 +64,7 @@ func TestExitWithFlush_WithoutFlusher(t *testing.T) {
 // TestExitWithFlush_ActuallyCalls tests that ExitWithFlush actually calls the function
 func TestExitWithFlush_ActuallyCalls(t *testing.T) {
 	// Create a logger that implements Sync
-	logger := New(Config{Level: "info"})
+	logger := New(Config{Level: LevelInfo})
 	SetGlobal(logger)
 
 	// Test that ExitWithFlush can be called and doesn't panic
@@ -82,7 +82,7 @@ func TestExitWithFlush_ActuallyCalls(t *testing.T) {
 // TestExitWithFlush_DirectCall tests ExitWithFlush by calling it directly
 func TestExitWithFlush_DirectCall(t *testing.T) {
 	// Create a logger that implements Sync
-	logger := New(Config{Level: "info"})
+	logger := New(Config{Level: LevelInfo})
 	SetGlobal(logger)
 
 	// Test that ExitWithFlush can be called directly
@@ -111,7 +111,7 @@ func TestEnsureLoggerOnce_FirstCall(t *testing.T) {
 	resetGlobalsForTest()
 
 	// Test first call
-	cfg := Config{Level: "debug", Format: "text"}
+	cfg := Config{Level: LevelDebug, Format: FormatText}
 	EnsureLoggerOnce(cfg)
 
 	// Verify logger was set
@@ -125,7 +125,7 @@ func TestEnsureLoggerOnce_SubsequentCalls(t *testing.T) {
 	SetGlobal(initialLogger)
 
 	// Test subsequent calls with different config
-	cfg := Config{Level: "error", Format: "json"}
+	cfg := Config{Level: LevelError, Format: FormatJSON}
 	EnsureLoggerOnce(cfg)
 
 	// Verify logger is still the same (not changed)
@@ -138,9 +138,9 @@ func TestEnsureLoggerOnce_MultipleCalls(t *testing.T) {
 	resetGlobalsForTest()
 
 	// Test multiple calls
-	cfg1 := Config{Level: "debug", Format: "text"}
-	cfg2 := Config{Level: "error", Format: "json"}
-	cfg3 := Config{Level: "warn", Format: "text"}
+	cfg1 := Config{Level: LevelDebug, Format: FormatText}
+	cfg2 := Config{Level: LevelError, Format: FormatJSON}
+	cfg3 := Config{Level: LevelWarn, Format: FormatText}
 
 	EnsureLoggerOnce(cfg1)
 	firstLogger := peekGlobalForTest()
@@ -160,7 +160,7 @@ func TestEnsureLoggerOnce_MultipleCalls(t *testing.T) {
 func TestEnsureLoggerOnce_ConcurrentCalls(t *testing.T) {
 	// Test concurrent calls - note that sync.Once is global
 	// so this test will only work if EnsureLoggerOnce hasn't been called before
-	cfg := Config{Level: "info", Format: "json"}
+	cfg := Config{Level: LevelInfo, Format: FormatJSON}
 
 	// Create multiple goroutines calling EnsureLoggerOnce
 	done := make(chan bool, 10)
@@ -193,12 +193,12 @@ func TestEnsureLoggerOnce_WithDifferentConfigs(t *testing.T) {
 		cfg  Config
 	}{
 		{"Minimal", Config{}},
-		{"WithLevel", Config{Level: "debug"}},
-		{"WithFormat", Config{Format: "json"}},
+		{"WithLevel", Config{Level: LevelDebug}},
+		{"WithFormat", Config{Format: FormatJSON}},
 		{"WithGlobalFields", Config{GlobalFields: map[string]string{"service": "test"}}},
 		{"Complete", Config{
-			Level:        "warn",
-			Format:       "text",
+			Level:        LevelWarn,
+			Format:       FormatText,
 			GlobalFields: map[string]string{"service": "test", "version": "1.0"},
 		}},
 	}
@@ -220,8 +220,8 @@ func TestEnsureLoggerOnce_Integration(t *testing.T) {
 
 	// Test integration with actual logging
 	cfg := Config{
-		Level:  "debug",
-		Format: "text",
+		Level:  LevelDebug,
+		Format: FormatText,
 		GlobalFields: map[string]string{
 			"service": "integration-test",
 		},
@@ -253,7 +253,7 @@ func TestEnsureLoggerOnce_WithNilConfig(t *testing.T) {
 
 func TestEnsureLoggerOnce_ThreadSafety(t *testing.T) {
 	// Test thread safety by calling from multiple goroutines
-	cfg := Config{Level: "info"}
+	cfg := Config{Level: LevelInfo}
 
 	// Create a channel to signal completion
 	done := make(chan bool, 100)
@@ -293,7 +293,7 @@ func TestLoggerExtension_WithCustomLogger(t *testing.T) {
 	SetGlobal(customLogger)
 
 	// Try to ensure logger once
-	cfg := Config{Level: "debug"}
+	cfg := Config{Level: LevelDebug}
 	EnsureLoggerOnce(cfg)
 
 	// Should still be the custom logger

@@ -39,8 +39,16 @@ type Config struct {
 	FilterRules []handler.FilterRule
 	// FilterMode selects what a FilterRules match does. Defaults to
 	// handler.ModeDrop, matching this field's pre-existing behavior.
-	FilterMode   handler.Mode
-	Format       string
+	FilterMode handler.Mode
+	Format     Format
+	// FormatString is a deprecated bridge for Format: parsed with ParseFormat
+	// and used only when Format is unset (its zero value, FormatText). If
+	// Format was itself set to something other than the value FormatString
+	// parses to, Validate reports the conflict instead of picking one
+	// silently.
+	//
+	// Deprecated: set Format directly.
+	FormatString string
 	GlobalFields map[string]string
 
 	// Sink is the terminal handler that receives fully decorated records:
@@ -75,11 +83,22 @@ type Config struct {
 	// RateLimit, ContextFields and the outer ContextHandler still apply.
 	PipelineOverride slog.Handler
 
-	Hook      func(ctx context.Context, r slog.Record) (context.Context, bool)
-	Keys      []string
-	Level     string
-	RateLimit RateLimitConfig
-	Sampling  SamplingConfig
+	Hook func(ctx context.Context, r slog.Record) (context.Context, bool)
+
+	// Keys no longer has any effect.
+	//
+	// Deprecated: unused; kept only so existing struct literals compile, and
+	// will be removed in a future release.
+	Keys []string
+
+	Level Level
+	// LevelString is a deprecated bridge for Level. See FormatString for the
+	// precedence rule between a typed field and its legacy string.
+	//
+	// Deprecated: set Level directly.
+	LevelString string
+	RateLimit   RateLimitConfig
+	Sampling    SamplingConfig
 
 	// ContextFields extracts fields from a context. A logger configured with
 	// one reads its own immutable field and never consults the process-wide
@@ -113,9 +132,10 @@ type Config struct {
 }
 
 // Validate reports every problem with cfg that New cannot silently work
-// around. It does not report an unparsable Level or Format string: those
-// already fail toward a safe default (parseLevel) and retyping them is
-// out of scope here.
+// around: an unparsable LevelString/FormatString/Sampling.MinLevelString, a
+// typed field that disagrees with its legacy string bridge, an out-of-range
+// Format, a negative BufferSize, and everything Sampling.Validate already
+// checked.
 func (cfg Config) Validate() error {
 	var errs []error
 
@@ -149,15 +169,31 @@ func (cfg Config) Validate() error {
 		if cfg.Writer != nil {
 			ignored = append(ignored, "Writer")
 		}
-		if cfg.Format != "" {
+		if cfg.Format != FormatText || cfg.FormatString != "" {
 			ignored = append(ignored, "Format")
 		}
-		if cfg.Level != "" {
+		if cfg.Level != LevelInfo || cfg.LevelString != "" {
 			ignored = append(ignored, "Level")
 		}
 		if len(ignored) > 0 {
 			errs = append(errs, fmt.Errorf("Config: PipelineOverride is set, which ignores: %s", strings.Join(ignored, ", ")))
 		}
+	}
+
+	if _, err := resolveLevel("Level", cfg.Level, cfg.LevelString); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := resolveFormat("Format", cfg.Format, cfg.FormatString); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.Format > FormatJSON {
+		errs = append(errs, fmt.Errorf("Config: Format(%d) is not a valid Format value", cfg.Format))
+	}
+	if cfg.BufferSize < 0 {
+		errs = append(errs, fmt.Errorf("Config: BufferSize must be >= 0, got %d", cfg.BufferSize))
+	}
+	if _, err := resolveLevel("Sampling.MinLevel", cfg.Sampling.MinLevel, cfg.Sampling.MinLevelString); err != nil {
+		errs = append(errs, err)
 	}
 
 	if cfg.Sampling.Enabled {
@@ -222,7 +258,12 @@ type RateLimitConfig struct {
 type SamplingConfig struct {
 	Enabled  bool
 	Interval time.Duration
-	MinLevel string
+	MinLevel Level
+	// MinLevelString is a deprecated bridge for MinLevel, resolved with the
+	// same precedence rule as Config.LevelString.
+	//
+	// Deprecated: set MinLevel directly.
+	MinLevelString string
 
 	// Probability is the chance in [0,1] that a record passes the probability
 	// gate. Zero means "unset" and is treated as 1 (emit everything): a
@@ -302,9 +343,10 @@ func New(cfg Config, opts ...Option) Logger {
 // Logger is always usable: an invalid combination is resolved the same way
 // New resolves it (see Validate).
 func NewWithError(cfg Config, opts ...Option) (Logger, error) {
-	level := parseLevel(cfg.Level)
+	level, _ := resolveLevel("Level", cfg.Level, cfg.LevelString)
+	format, _ := resolveFormat("Format", cfg.Format, cfg.FormatString)
 	levelVar := new(slog.LevelVar)
-	levelVar.Set(level)
+	levelVar.Set(level.slogLevel())
 
 	// lifecycleHandlers is captured while the pipeline is being assembled
 	// rather than rediscovered at Flush/Shutdown time. Walking the chain at
@@ -338,7 +380,7 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 			if w == nil {
 				w = os.Stdout
 			}
-			if cfg.Format == "json" {
+			if format == FormatJSON {
 				base = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: levelVar})
 			} else {
 				base = slog.NewTextHandler(w, &slog.HandlerOptions{Level: levelVar})
@@ -362,7 +404,7 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 
 	slogLogger := slog.New(h)
 	if cfg.LogInitialization {
-		slogLogger.Info("Logger initialized", "level", cfg.Level, "format", cfg.Format)
+		slogLogger.Info("Logger initialized", "level", level.String(), "format", format.String())
 	}
 	optVal := &loggerOptions{}
 	for _, o := range opts {
@@ -401,10 +443,11 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher) {
 		// Config.Validate already reports the identical problem; the
 		// error-swallowing constructor just applies the same clamped,
 		// emitting-safe defaults without a second, redundant report.
+		minLevel, _ := resolveLevel("Sampling.MinLevel", cfg.Sampling.MinLevel, cfg.Sampling.MinLevelString)
 		h = handler.NewSamplingHandler(h, handler.SamplingConfig{
 			Interval:    cfg.Sampling.Interval,
 			Probability: cfg.Sampling.Probability,
-			MinLevel:    parseLevel(cfg.Sampling.MinLevel),
+			MinLevel:    minLevel.slogLevel(),
 			KeyFunc:     cfg.Sampling.KeyFunc,
 			MaxKeys:     cfg.Sampling.MaxKeys,
 		})
@@ -423,20 +466,4 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher) {
 	}
 
 	return h, lifecycleHandlers
-}
-
-// parseLevel converts a string level to a slog.Level.
-func parseLevel(lvl string) slog.Level {
-	switch strings.ToLower(lvl) {
-	case "debug":
-		return slog.LevelDebug
-	case "info":
-		return slog.LevelInfo
-	case "warn", "warning":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

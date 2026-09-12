@@ -13,8 +13,8 @@ import (
 // argument it does not take).
 func Example_basicUsage() {
 	log := logger.New(logger.Config{
-		Level:  "info",
-		Format: "json",
+		Level:  logger.LevelInfo,
+		Format: logger.FormatJSON,
 		GlobalFields: map[string]string{
 			"service": "my-api",
 			"env":     "prod",
@@ -29,8 +29,8 @@ func Example_basicUsage() {
 // a non-default level and format, plus fields passed at the call site.
 func Example_structuredLogging() {
 	log := logger.New(logger.Config{
-		Level:  "debug",
-		Format: "text",
+		Level:  logger.LevelDebug,
+		Format: logger.FormatText,
 	})
 
 	log.Info("user login", "user_id", "123", "ip", "192.168.1.1")

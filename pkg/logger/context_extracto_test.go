@@ -48,7 +48,7 @@ func TestContextFieldExtractor_Integration(t *testing.T) {
 	SetContextFieldExtractor(extractor)
 
 	// Create logger
-	cfg := Config{Level: "debug"}
+	cfg := Config{Level: LevelDebug}
 	logger := New(cfg)
 
 	// Test with context that has user_id
