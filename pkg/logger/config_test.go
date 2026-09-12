@@ -37,8 +37,8 @@ func TestNew_WithMinimalConfig(t *testing.T) {
 
 func TestNew_WithJSONFormat(t *testing.T) {
 	cfg := Config{
-		Level:  "info",
-		Format: "json",
+		Level:  LevelInfo,
+		Format: FormatJSON,
 	}
 	logger := New(cfg)
 
@@ -48,8 +48,8 @@ func TestNew_WithJSONFormat(t *testing.T) {
 
 func TestNew_WithTextFormat(t *testing.T) {
 	cfg := Config{
-		Level:  "debug",
-		Format: "text",
+		Level:  LevelDebug,
+		Format: FormatText,
 	}
 	logger := New(cfg)
 
@@ -59,7 +59,7 @@ func TestNew_WithTextFormat(t *testing.T) {
 
 func TestNew_WithFilterRules(t *testing.T) {
 	cfg := Config{
-		Level: "info",
+		Level: LevelInfo,
 		FilterRules: []handler.FilterRule{
 			{Key: "sensitive", Value: "data"},
 		},
@@ -72,7 +72,7 @@ func TestNew_WithFilterRules(t *testing.T) {
 
 func TestNew_WithGlobalFields(t *testing.T) {
 	cfg := Config{
-		Level: "warn",
+		Level: LevelWarn,
 		GlobalFields: map[string]string{
 			"service": "test-service",
 			"version": "1.0.0",
@@ -86,12 +86,12 @@ func TestNew_WithGlobalFields(t *testing.T) {
 
 func TestNew_WithSamplingEnabled(t *testing.T) {
 	cfg := Config{
-		Level: "error",
+		Level: LevelError,
 		Sampling: SamplingConfig{
 			Enabled:     true,
 			Interval:    time.Second,
 			Probability: 0.5,
-			MinLevel:    "info",
+			MinLevel:    LevelInfo,
 		},
 	}
 	logger := New(cfg)
@@ -102,7 +102,7 @@ func TestNew_WithSamplingEnabled(t *testing.T) {
 
 func TestNew_WithBufferSize(t *testing.T) {
 	cfg := Config{
-		Level:      "debug",
+		Level:      LevelDebug,
 		BufferSize: 100,
 	}
 	logger := New(cfg)
@@ -113,7 +113,7 @@ func TestNew_WithBufferSize(t *testing.T) {
 
 func TestNew_WithHook(t *testing.T) {
 	cfg := Config{
-		Level: "info",
+		Level: LevelInfo,
 		Hook: func(ctx context.Context, r slog.Record) (context.Context, bool) {
 			return ctx, true
 		},
@@ -126,8 +126,8 @@ func TestNew_WithHook(t *testing.T) {
 
 func TestNew_WithAllHandlers(t *testing.T) {
 	cfg := Config{
-		Level:  "debug",
-		Format: "json",
+		Level:  LevelDebug,
+		Format: FormatJSON,
 		FilterRules: []handler.FilterRule{
 			{Key: "sensitive", Value: "data"},
 		},
@@ -138,7 +138,7 @@ func TestNew_WithAllHandlers(t *testing.T) {
 			Enabled:     true,
 			Interval:    time.Millisecond * 100,
 			Probability: 0.8,
-			MinLevel:    "info",
+			MinLevel:    LevelInfo,
 		},
 		BufferSize: 50,
 		Hook: func(ctx context.Context, r slog.Record) (context.Context, bool) {
@@ -152,60 +152,118 @@ func TestNew_WithAllHandlers(t *testing.T) {
 }
 
 func TestParseLevel_Debug(t *testing.T) {
-	level := parseLevel("debug")
-	assert.Equal(t, slog.LevelDebug, level)
+	level, err := ParseLevel("debug")
+	require.NoError(t, err)
+	assert.Equal(t, LevelDebug, level)
 
-	level = parseLevel("DEBUG")
-	assert.Equal(t, slog.LevelDebug, level)
+	level, err = ParseLevel("DEBUG")
+	require.NoError(t, err)
+	assert.Equal(t, LevelDebug, level)
 }
 
 func TestParseLevel_Info(t *testing.T) {
-	level := parseLevel("info")
-	assert.Equal(t, slog.LevelInfo, level)
+	level, err := ParseLevel("info")
+	require.NoError(t, err)
+	assert.Equal(t, LevelInfo, level)
 
-	level = parseLevel("INFO")
-	assert.Equal(t, slog.LevelInfo, level)
+	level, err = ParseLevel("INFO")
+	require.NoError(t, err)
+	assert.Equal(t, LevelInfo, level)
 }
 
 func TestParseLevel_Warn(t *testing.T) {
-	level := parseLevel("warn")
-	assert.Equal(t, slog.LevelWarn, level)
+	level, err := ParseLevel("warn")
+	require.NoError(t, err)
+	assert.Equal(t, LevelWarn, level)
 
-	level = parseLevel("WARN")
-	assert.Equal(t, slog.LevelWarn, level)
+	level, err = ParseLevel("WARN")
+	require.NoError(t, err)
+	assert.Equal(t, LevelWarn, level)
 
-	level = parseLevel("warning")
-	assert.Equal(t, slog.LevelWarn, level)
+	level, err = ParseLevel("warning")
+	require.NoError(t, err)
+	assert.Equal(t, LevelWarn, level)
 
-	level = parseLevel("WARNING")
-	assert.Equal(t, slog.LevelWarn, level)
+	level, err = ParseLevel("WARNING")
+	require.NoError(t, err)
+	assert.Equal(t, LevelWarn, level)
 }
 
 func TestParseLevel_Error(t *testing.T) {
-	level := parseLevel("error")
-	assert.Equal(t, slog.LevelError, level)
+	level, err := ParseLevel("error")
+	require.NoError(t, err)
+	assert.Equal(t, LevelError, level)
 
-	level = parseLevel("ERROR")
-	assert.Equal(t, slog.LevelError, level)
+	level, err = ParseLevel("ERROR")
+	require.NoError(t, err)
+	assert.Equal(t, LevelError, level)
 }
 
-func TestParseLevel_Default(t *testing.T) {
-	// Test unknown level returns info
-	level := parseLevel("unknown")
-	assert.Equal(t, slog.LevelInfo, level)
+// TestParseLevel_EmptyIsExplicitDefault pins the "unset" case: the empty
+// string is not a typo, it means "use the default," so it must return
+// LevelInfo with a nil error -- unlike any other unrecognized input.
+func TestParseLevel_EmptyIsExplicitDefault(t *testing.T) {
+	level, err := ParseLevel("")
+	require.NoError(t, err)
+	assert.Equal(t, LevelInfo, level)
+}
 
-	level = parseLevel("")
-	assert.Equal(t, slog.LevelInfo, level)
+// TestParseLevel_RejectsUnknownInput is the regression net for the defect
+// this issue exists to close: an unrecognized level name must be reported,
+// never silently coerced into LevelInfo.
+func TestParseLevel_RejectsUnknownInput(t *testing.T) {
+	for _, in := range []string{"unknown", "invalid", "debgu", "trace", "fatal", "panic", "notice"} {
+		t.Run(in, func(t *testing.T) {
+			_, err := ParseLevel(in)
+			require.Error(t, err, "ParseLevel(%q) must return an error, not silently default", in)
+			assert.Contains(t, err.Error(), in)
+		})
+	}
+}
 
-	level = parseLevel("invalid")
-	assert.Equal(t, slog.LevelInfo, level)
+func TestParseFormat_JSON(t *testing.T) {
+	for _, in := range []string{"json", "JSON", "Json"} {
+		t.Run(in, func(t *testing.T) {
+			format, err := ParseFormat(in)
+			require.NoError(t, err)
+			assert.Equal(t, FormatJSON, format)
+		})
+	}
+}
+
+func TestParseFormat_Text(t *testing.T) {
+	for _, in := range []string{"text", "TEXT"} {
+		t.Run(in, func(t *testing.T) {
+			format, err := ParseFormat(in)
+			require.NoError(t, err)
+			assert.Equal(t, FormatText, format)
+		})
+	}
+}
+
+// TestParseFormat_EmptyIsExplicitDefault mirrors
+// TestParseLevel_EmptyIsExplicitDefault for Format.
+func TestParseFormat_EmptyIsExplicitDefault(t *testing.T) {
+	format, err := ParseFormat("")
+	require.NoError(t, err)
+	assert.Equal(t, FormatText, format)
+}
+
+func TestParseFormat_RejectsUnknownInput(t *testing.T) {
+	for _, in := range []string{"logfmt", "jsno", "yaml"} {
+		t.Run(in, func(t *testing.T) {
+			_, err := ParseFormat(in)
+			require.Error(t, err, "ParseFormat(%q) must return an error, not silently default", in)
+			assert.Contains(t, err.Error(), in)
+		})
+	}
 }
 
 func TestNew_Integration(t *testing.T) {
 	// Test that logger can actually log
 	cfg := Config{
-		Level:  "debug",
-		Format: "text",
+		Level:  LevelDebug,
+		Format: FormatText,
 	}
 	logger := New(cfg)
 
@@ -255,8 +313,8 @@ func TestNew_WithCustomOutput(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	cfg := Config{
-		Level:  "info",
-		Format: "json",
+		Level:  LevelInfo,
+		Format: FormatJSON,
 	}
 	logger := New(cfg)
 
@@ -280,7 +338,7 @@ func TestConfig_Writer_DefaultsToStdout(t *testing.T) {
 	os.Stdout = tmpFile
 	defer func() { os.Stdout = oldStdout }()
 
-	logger := New(Config{Format: "json"})
+	logger := New(Config{Format: FormatJSON})
 	logger.Info("default writer message")
 
 	content, err := os.ReadFile(tmpFile.Name())
@@ -290,7 +348,7 @@ func TestConfig_Writer_DefaultsToStdout(t *testing.T) {
 
 func TestConfig_Writer_WritesIntoBuffer(t *testing.T) {
 	var buf bytes.Buffer
-	logger := New(Config{Writer: &buf, Format: "json"})
+	logger := New(Config{Writer: &buf, Format: FormatJSON})
 	logger.Info("buffered message", "key", "value")
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
@@ -306,7 +364,7 @@ func TestConfig_Writer_ComposesWithPipeline(t *testing.T) {
 	var buf bytes.Buffer
 	hookCalled := false
 	cfg := Config{
-		Format: "json",
+		Format: FormatJSON,
 		Writer: &buf,
 		GlobalFields: map[string]string{
 			"service": "test-service",
@@ -333,7 +391,7 @@ func TestConfig_Writer_ComposesWithPipeline(t *testing.T) {
 
 func TestConfig_Writer_ConcurrentWritesAreNonInterleaved(t *testing.T) {
 	var buf syncBuffer
-	logger := New(Config{Writer: &buf, Format: "json"})
+	logger := New(Config{Writer: &buf, Format: FormatJSON})
 
 	const n = 100
 	var wg sync.WaitGroup
@@ -383,7 +441,7 @@ func (s *syncBuffer) String() string {
 // stdout — leaving stdout to carry only what the logger itself writes there.
 func TestMain(m *testing.M) {
 	if os.Getenv("KITLOGGER_WRITER_SUBPROCESS") == "1" {
-		logger := New(Config{Writer: os.Stderr, Format: "json"})
+		logger := New(Config{Writer: os.Stderr, Format: FormatJSON})
 		logger.Info("subprocess stderr message")
 		os.Exit(0)
 	}
@@ -502,7 +560,7 @@ func TestConfig_Sink_IsDecoratedLikeTheDefaultHandler(t *testing.T) {
 // because the shared LevelVar was never wired into it.
 func TestConfig_Sink_SetLevelWorks(t *testing.T) {
 	cap := newCapturingHandler()
-	logger := New(Config{Sink: cap, Level: "error"})
+	logger := New(Config{Sink: cap, Level: LevelError})
 
 	logger.Info("suppressed before SetLevel")
 	require.Empty(t, cap.getEntries())
@@ -578,8 +636,8 @@ func TestConfig_Validate_PipelineOverrideNamesEveryIgnoredField(t *testing.T) {
 		{"BufferSize", "BufferSize", Config{BufferSize: 10}},
 		{"Hook", "Hook", Config{Hook: func(ctx context.Context, r slog.Record) (context.Context, bool) { return ctx, true }}},
 		{"Writer", "Writer", Config{Writer: &bytes.Buffer{}}},
-		{"Format", "Format", Config{Format: "json"}},
-		{"Level", "Level", Config{Level: "debug"}},
+		{"Format", "Format", Config{Format: FormatJSON}},
+		{"Level", "Level", Config{Level: LevelDebug}},
 	}
 
 	for _, tt := range tests {
@@ -610,6 +668,120 @@ func TestConfig_Validate_PipelineOverrideDoesNotFlagFieldsThatStillApply(t *test
 	err := cfg.Validate()
 
 	assert.NoError(t, err)
+}
+
+// TestConfig_ZeroValueValidatesAndBehavesLikeBefore pins the non-breaking
+// half of the retyping: a zero-value Config still means "text to stdout at
+// info," and still passes Validate.
+func TestConfig_ZeroValueValidatesAndBehavesLikeBefore(t *testing.T) {
+	var cfg Config
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, LevelInfo, cfg.Level)
+	assert.Equal(t, FormatText, cfg.Format)
+}
+
+func TestConfig_Validate_NegativeBufferSize(t *testing.T) {
+	err := Config{BufferSize: -1}.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "BufferSize")
+}
+
+func TestConfig_Validate_OutOfRangeFormat(t *testing.T) {
+	err := Config{Format: Format(7)}.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Format")
+}
+
+// TestConfig_Validate_InvalidLevelString is the regression net at the Config
+// level for the defect ParseLevel already guards at the parser level: a typo
+// in the deprecated bridge must fail Validate, not silently resolve to info.
+func TestConfig_Validate_InvalidLevelString(t *testing.T) {
+	err := Config{LevelString: "debgu"}.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "LevelString")
+
+	_, newErr := NewWithError(Config{LevelString: "debgu"})
+	require.Error(t, newErr, "NewWithError must surface the bad LevelString rather than silently succeeding at info")
+}
+
+func TestConfig_Validate_InvalidFormatString(t *testing.T) {
+	err := Config{FormatString: "logfmt"}.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "FormatString")
+}
+
+// TestConfig_Validate_TypedAndLegacyEquivalentIsValid covers the case where
+// both Level and LevelString are set but agree: no conflict, no error.
+func TestConfig_Validate_TypedAndLegacyEquivalentIsValid(t *testing.T) {
+	err := Config{Level: LevelWarn, LevelString: "warn"}.Validate()
+	assert.NoError(t, err)
+
+	err = Config{Format: FormatJSON, FormatString: "json"}.Validate()
+	assert.NoError(t, err)
+}
+
+// TestConfig_Validate_TypedAndLegacyConflictIsAnError covers the opposite
+// case: both set, disagreeing -- Validate must report it rather than picking
+// one of the two silently.
+func TestConfig_Validate_TypedAndLegacyConflictIsAnError(t *testing.T) {
+	err := Config{Level: LevelWarn, LevelString: "debug"}.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Level")
+
+	err = Config{Format: FormatJSON, FormatString: "text"}.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Format")
+}
+
+func TestConfig_Validate_SamplingMinLevelStringConflict(t *testing.T) {
+	err := Config{Sampling: SamplingConfig{MinLevel: LevelWarn, MinLevelString: "error"}}.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Sampling.MinLevel")
+}
+
+// TestConfig_Validate_ReportsEveryFailureAtOnce pins errors.Join being used
+// instead of fail-fast: a Config with several independent problems must name
+// all of them in one error, not just the first one Validate happens to hit.
+func TestConfig_Validate_ReportsEveryFailureAtOnce(t *testing.T) {
+	err := Config{
+		BufferSize:  -1,
+		LevelString: "debgu",
+		Sampling:    SamplingConfig{MinLevelString: "logfmt"},
+	}.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "BufferSize")
+	assert.Contains(t, err.Error(), "LevelString")
+	assert.Contains(t, err.Error(), "Sampling.MinLevel")
+}
+
+// TestConfig_LevelString_LegacyBridgeWorksEndToEnd proves the deprecated
+// string bridge actually drives behavior, not just Validate: a Config built
+// only through LevelString/FormatString must gate/encode exactly like the
+// typed equivalent.
+func TestConfig_LevelString_LegacyBridgeWorksEndToEnd(t *testing.T) {
+	cap := newCapturingHandler()
+	logger := New(Config{Sink: cap, LevelString: "warn"})
+
+	logger.Info("suppressed at warn")
+	assert.Empty(t, cap.getEntries())
+
+	logger.Warn("visible at warn")
+	assert.Len(t, cap.getEntries(), 1)
+}
+
+func TestConfig_FormatString_LegacyBridgeSelectsJSON(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(Config{Writer: &buf, FormatString: "JSON"})
+	logger.Info("hi")
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &decoded), "FormatString bridge must select the JSON handler")
 }
 
 func TestNewWithError_ReturnsValidateError(t *testing.T) {

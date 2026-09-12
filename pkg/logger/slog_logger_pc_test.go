@@ -99,7 +99,7 @@ func newFacade(t *testing.T, bufferSize int) (Logger, *gateHandler, func()) {
 	t.Helper()
 
 	sink := newGateHandler()
-	log := New(Config{Level: "debug", Sink: sink, BufferSize: bufferSize})
+	log := New(Config{Level: LevelDebug, Sink: sink, BufferSize: bufferSize})
 
 	flush := func() {}
 	if bufferSize > 0 {
@@ -312,7 +312,7 @@ func attrStrings(record slog.Record) []string {
 func TestSlogLogger_DisabledLevelPaysNothing(t *testing.T) {
 	sink := newGateHandler()
 	counter := &countingHook{}
-	log := New(Config{Level: "debug", Sink: sink}, WithCounterHook(counter))
+	log := New(Config{Level: LevelDebug, Sink: sink}, WithCounterHook(counter))
 	slogLog, ok := log.(*SlogLogger)
 	require.True(t, ok)
 
@@ -393,7 +393,7 @@ func TestSlogLogger_DisabledLevelEmitsNothing(t *testing.T) {
 	for _, tc := range facadeCalls() {
 		t.Run(tc.name, func(t *testing.T) {
 			sink := newGateHandler()
-			log := New(Config{Level: "debug", Sink: sink})
+			log := New(Config{Level: LevelDebug, Sink: sink})
 			sink.enabled.Store(false)
 
 			tc.call(log)
@@ -408,7 +408,7 @@ func TestSlogLogger_DisabledLevelEmitsNothing(t *testing.T) {
 func TestSlogLogger_RateLimitSemanticsPreserved(t *testing.T) {
 	sink := newGateHandler()
 	counter := &countingHook{}
-	log := New(Config{Level: "debug", Sink: sink}, WithCounterHook(counter))
+	log := New(Config{Level: LevelDebug, Sink: sink}, WithCounterHook(counter))
 
 	for i := 0; i < 3; i++ {
 		log.Info("rate limited", WithRateLimit("key", time.Hour), WithCounter("metric"))

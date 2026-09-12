@@ -21,8 +21,8 @@ import "github.com/pablogore/kit-logger/pkg/logger"
 
 func main() {
     log := logger.New(logger.Config{
-        Level:  "info",
-        Format: "json",
+        Level:  logger.LevelInfo,
+        Format: logger.FormatJSON,
         GlobalFields: map[string]string{
             "service": "my-api",
             "env":     "prod",
@@ -40,8 +40,8 @@ By default the logger writes to stdout. Set `Config.Writer` to send output anywh
 
 ```go
 log := logger.New(logger.Config{
-    Level:  "info",
-    Format: "json",
+    Level:  logger.LevelInfo,
+    Format: logger.FormatJSON,
     Writer: os.Stderr, // keeps stdout free for a CLI's own machine-readable output
 })
 ```
@@ -89,7 +89,7 @@ lifecycle is therefore host-owned and explicit.
 `Logger` is unchanged. Type-assert to `ManagedLogger` to reach it:
 
 ```go
-log := logger.New(logger.Config{BufferSize: 4096, Format: "json"})
+log := logger.New(logger.Config{BufferSize: 4096, Format: logger.FormatJSON})
 logger.SetGlobal(log)
 
 if managed, ok := log.(logger.ManagedLogger); ok {
@@ -136,7 +136,7 @@ lazy default is constructed exactly once no matter how many goroutines call
 `L()` first.
 
 ```go
-log := logger.New(logger.Config{Level: "info", Format: "json"})
+log := logger.New(logger.Config{Level: logger.LevelInfo, Format: logger.FormatJSON})
 logger.SetGlobal(log)          // safe concurrently with L(), even under load
 ```
 
@@ -190,8 +190,8 @@ tracing backend becomes a one-field log query instead of a timestamp hunt across
 import kitotel "github.com/pablogore/kit-logger/pkg/logger/otel"
 
 log := logger.New(logger.Config{
-    Level:          "info",
-    Format:         "json",
+    Level:          logger.LevelInfo,
+    Format:         logger.FormatJSON,
     ContextHandler: kitotel.Decorator(kitotel.Options{}),
 })
 

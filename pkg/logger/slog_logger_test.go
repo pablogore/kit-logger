@@ -253,7 +253,7 @@ func TestSlogLogger_SetLevel_NilLevelVar(t *testing.T) {
 // with a custom Handler, because the shared LevelVar was never wired into it.
 func TestSlogLogger_SetLevel_CustomHandlerIsGated(t *testing.T) {
 	cap := newCapturingHandler()
-	logger := New(Config{Handler: cap, Level: "info"})
+	logger := New(Config{Handler: cap, Level: LevelInfo})
 
 	logger.SetLevel(slog.LevelError)
 	logger.Info("must be suppressed now")
