@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -41,12 +42,39 @@ type Config struct {
 	FilterMode   handler.Mode
 	Format       string
 	GlobalFields map[string]string
-	Handler      slog.Handler // optional; if set, used as the base handler (e.g. for tests)
-	Hook         func(ctx context.Context, r slog.Record) (context.Context, bool)
-	Keys         []string
-	Level        string
-	RateLimit    RateLimitConfig
-	Sampling     SamplingConfig
+
+	// Sink is the terminal handler that receives fully decorated records:
+	// FilterRules, GlobalFields, component attribution, Sampling, Prometheus,
+	// BufferSize and Hook are all applied on top of it, in the same order as
+	// the default Text/JSON handler. When nil, that default handler (over
+	// Writer, chosen by Format) is used instead.
+	//
+	// SetLevel works uniformly here too: Sink is wrapped in an internal
+	// handler gated on the same LevelVar the default path uses, so a custom
+	// sink gets dynamic level control for free.
+	Sink slog.Handler
+
+	// Handler is a deprecated alias for Sink; Sink wins if both are set.
+	//
+	// Deprecated: use Sink. Handler used to bypass the entire pipeline --
+	// FilterRules, GlobalFields, component attribution, Sampling, Prometheus,
+	// BufferSize, Hook and SetLevel were all silently ignored when it was set.
+	// It now behaves exactly like Sink. Use PipelineOverride for the old
+	// bypass behavior.
+	Handler slog.Handler
+
+	// PipelineOverride replaces the entire pipeline verbatim, exactly as
+	// Handler used to: every other field in this Config is ignored, and
+	// Validate reports that as an error naming the ignored fields. This is the
+	// escape hatch for a caller that must not have its chain decorated, e.g.
+	// one that already assembled its own Filter/Sampling/Buffer stack.
+	PipelineOverride slog.Handler
+
+	Hook      func(ctx context.Context, r slog.Record) (context.Context, bool)
+	Keys      []string
+	Level     string
+	RateLimit RateLimitConfig
+	Sampling  SamplingConfig
 
 	// ContextFields extracts fields from a context. A logger configured with
 	// one reads its own immutable field and never consults the process-wide
@@ -56,8 +84,8 @@ type Config struct {
 	// It is applied by WithContext and by every *Context log method.
 	ContextFields ContextFieldExtractorFunc
 
-	// Writer is the destination for the default text/JSON handler.
-	// Defaults to stdout. Ignored when Handler is set.
+	// Writer is the destination for the default text/JSON handler. Defaults to
+	// stdout. Ignored when Sink, Handler or PipelineOverride is set.
 	Writer io.Writer
 
 	// ContextHandler wraps the assembled pipeline as its outermost decorator.
@@ -72,6 +100,64 @@ type Config struct {
 	// of the OpenTelemetry dependency — the consumer imports
 	// pkg/logger/otel, this package never does.
 	ContextHandler HandlerDecorator
+
+	// LogInitialization makes New emit one "Logger initialized" record through
+	// the constructed pipeline. Defaults to false: a library constructor
+	// should not write to stdout as a side effect of being called.
+	LogInitialization bool
+}
+
+// Validate reports every problem with cfg that New cannot silently work
+// around. It does not report an unparsable Level or Format string: those
+// already fail toward a safe default (parseLevel) and retyping them is
+// out of scope here.
+func (cfg Config) Validate() error {
+	var errs []error
+
+	if cfg.Handler != nil && cfg.Sink != nil {
+		errs = append(errs, fmt.Errorf("Config: both Handler and Sink are set; Sink takes precedence (Handler is deprecated, use Sink)"))
+	}
+
+	if cfg.PipelineOverride != nil {
+		var ignored []string
+		if cfg.Handler != nil {
+			ignored = append(ignored, "Handler")
+		}
+		if cfg.Sink != nil {
+			ignored = append(ignored, "Sink")
+		}
+		if len(cfg.FilterRules) > 0 {
+			ignored = append(ignored, "FilterRules")
+		}
+		if len(cfg.GlobalFields) > 0 {
+			ignored = append(ignored, "GlobalFields")
+		}
+		if cfg.Sampling.Enabled {
+			ignored = append(ignored, "Sampling")
+		}
+		if cfg.BufferSize > 0 {
+			ignored = append(ignored, "BufferSize")
+		}
+		if cfg.Hook != nil {
+			ignored = append(ignored, "Hook")
+		}
+		if len(ignored) > 0 {
+			errs = append(errs, fmt.Errorf("Config: PipelineOverride is set, which ignores: %s", strings.Join(ignored, ", ")))
+		}
+	}
+
+	if cfg.Sampling.Enabled {
+		if err := (handler.SamplingConfig{
+			Interval:    cfg.Sampling.Interval,
+			Probability: cfg.Sampling.Probability,
+			KeyFunc:     cfg.Sampling.KeyFunc,
+			MaxKeys:     cfg.Sampling.MaxKeys,
+		}).Validate(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // HandlerDecorator wraps a handler in another one. It is the shape of the
@@ -177,7 +263,7 @@ func L() Logger {
 		return *p
 	}
 	globalOnce.Do(func() {
-		l := New(Config{})
+		l := New(Config{LogInitialization: true})
 		// CompareAndSwap rather than Store: a SetGlobal that landed while New
 		// was running expresses more recent intent and must not be clobbered
 		// by the lazy default.
@@ -188,7 +274,22 @@ func L() Logger {
 
 // New creates a new Logger instance with all handlers configured.
 // Optional opts (e.g. WithCounterHook) apply rate-limit-related behavior when WithRateLimit/WithCounter are used in log calls.
+//
+// A Config that fails Validate still produces a usable logger -- New reports
+// the problem to stderr rather than failing outright. Use NewWithError to
+// receive the error instead.
 func New(cfg Config, opts ...Option) Logger {
+	l, err := NewWithError(cfg, opts...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kit-logger: invalid configuration: %v\n", err)
+	}
+	return l
+}
+
+// NewWithError is New, but returns cfg.Validate's error instead of only
+// printing it to stderr. The returned Logger is always usable: an invalid
+// combination is resolved the same way New resolves it (see Validate).
+func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 	level := parseLevel(cfg.Level)
 	levelVar := new(slog.LevelVar)
 	levelVar.Set(level)
@@ -199,61 +300,42 @@ func New(cfg Config, opts ...Option) Logger {
 	// Unwrap severs the walk, and after With the outermost handler is a
 	// derived one, not the root that owns the buffer.
 	var lifecycleHandlers []Flusher
-
 	var h slog.Handler
-	if cfg.Handler != nil {
-		h = cfg.Handler
-		// The chain came from the caller, so this is the one case where the
-		// lifecycle-bearing handlers have to be discovered.
+
+	switch {
+	case cfg.PipelineOverride != nil:
+		// The chain came from the caller and bypasses decoration entirely, so
+		// this is the one case where the lifecycle-bearing handlers have to
+		// be discovered by walking it.
+		h = cfg.PipelineOverride
 		lifecycleHandlers = collectFlushers(h)
-	} else {
-		w := cfg.Writer
-		if w == nil {
-			w = os.Stdout
+	default:
+		sink := cfg.Sink
+		if sink == nil {
+			sink = cfg.Handler // deprecated alias
 		}
 
-		if cfg.Format == "json" {
-			h = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: levelVar})
+		var base slog.Handler
+		if sink != nil {
+			// Collected before wrapping: these are the caller's own
+			// Flushers, found the same way PipelineOverride's are.
+			lifecycleHandlers = collectFlushers(sink)
+			base = &levelHandler{next: sink, level: levelVar}
 		} else {
-			h = slog.NewTextHandler(w, &slog.HandlerOptions{Level: levelVar})
-		}
-
-		if len(cfg.FilterRules) > 0 {
-			h = handler.NewFilterHandlerWithMode(h, cfg.FilterRules, cfg.FilterMode)
-		}
-		if len(cfg.GlobalFields) > 0 {
-			h = handler.NewGlobalFieldsHandler(h, cfg.GlobalFields, true)
-		}
-		h = handler.NewComponentHandler(h)
-
-		if cfg.Sampling.Enabled {
-			sampler, err := handler.NewSamplingHandlerWithError(h, handler.SamplingConfig{
-				Interval:    cfg.Sampling.Interval,
-				Probability: cfg.Sampling.Probability,
-				MinLevel:    parseLevel(cfg.Sampling.MinLevel),
-				KeyFunc:     cfg.Sampling.KeyFunc,
-				MaxKeys:     cfg.Sampling.MaxKeys,
-			})
-			if err != nil {
-				// Report loudly rather than silently reinterpreting the
-				// configuration. The handler is still usable: invalid values
-				// were clamped to emitting defaults, so no record is lost.
-				fmt.Fprintf(os.Stderr, "kit-logger: invalid sampling configuration, using emitting defaults: %v\n", err)
+			w := cfg.Writer
+			if w == nil {
+				w = os.Stdout
 			}
-			h = sampler
+			if cfg.Format == "json" {
+				base = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: levelVar})
+			} else {
+				base = slog.NewTextHandler(w, &slog.HandlerOptions{Level: levelVar})
+			}
 		}
 
-		h = handler.NewPrometheusHandler(h)
-
-		if cfg.BufferSize > 0 {
-			buffered := handler.NewBufferedHandler(h, cfg.BufferSize)
-			lifecycleHandlers = append(lifecycleHandlers, buffered)
-			h = buffered
-		}
-
-		if cfg.Hook != nil {
-			h = handler.NewHookHandler(h, cfg.Hook)
-		}
+		var extra []Flusher
+		h, extra = decorate(base, cfg)
+		lifecycleHandlers = append(lifecycleHandlers, extra...)
 	}
 
 	// Outermost, and after the flushers have been collected: a handler that
@@ -267,14 +349,14 @@ func New(cfg Config, opts ...Option) Logger {
 	}
 
 	slogLogger := slog.New(h)
-	if cfg.Handler == nil {
+	if cfg.LogInitialization {
 		slogLogger.Info("Logger initialized", "level", cfg.Level, "format", cfg.Format)
 	}
 	optVal := &loggerOptions{}
 	for _, o := range opts {
 		o(optVal)
 	}
-	return &SlogLogger{
+	logger := &SlogLogger{
 		logger:        slogLogger,
 		levelVar:      levelVar,
 		rateState:     newRateState(cfg.RateLimit.MaxKeys),
@@ -282,6 +364,54 @@ func New(cfg Config, opts ...Option) Logger {
 		lifecycle:     newLifecycleGroup(lifecycleHandlers...),
 		contextFields: cfg.ContextFields,
 	}
+	return logger, cfg.Validate()
+}
+
+// decorate wraps base in the Filter/GlobalFields/Component/Sampling/
+// Prometheus/Buffered/Hook chain, in that order. It is shared by the default
+// Text/JSON base and a caller-supplied Sink -- which is what makes Sink a
+// terminal handler for the pipeline instead of a total override of it.
+func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher) {
+	var lifecycleHandlers []Flusher
+
+	if len(cfg.FilterRules) > 0 {
+		h = handler.NewFilterHandlerWithMode(h, cfg.FilterRules, cfg.FilterMode)
+	}
+	if len(cfg.GlobalFields) > 0 {
+		h = handler.NewGlobalFieldsHandler(h, cfg.GlobalFields, true)
+	}
+	h = handler.NewComponentHandler(h)
+
+	if cfg.Sampling.Enabled {
+		sampler, err := handler.NewSamplingHandlerWithError(h, handler.SamplingConfig{
+			Interval:    cfg.Sampling.Interval,
+			Probability: cfg.Sampling.Probability,
+			MinLevel:    parseLevel(cfg.Sampling.MinLevel),
+			KeyFunc:     cfg.Sampling.KeyFunc,
+			MaxKeys:     cfg.Sampling.MaxKeys,
+		})
+		if err != nil {
+			// Report loudly rather than silently reinterpreting the
+			// configuration. The handler is still usable: invalid values
+			// were clamped to emitting defaults, so no record is lost.
+			fmt.Fprintf(os.Stderr, "kit-logger: invalid sampling configuration, using emitting defaults: %v\n", err)
+		}
+		h = sampler
+	}
+
+	h = handler.NewPrometheusHandler(h)
+
+	if cfg.BufferSize > 0 {
+		buffered := handler.NewBufferedHandler(h, cfg.BufferSize)
+		lifecycleHandlers = append(lifecycleHandlers, buffered)
+		h = buffered
+	}
+
+	if cfg.Hook != nil {
+		h = handler.NewHookHandler(h, cfg.Hook)
+	}
+
+	return h, lifecycleHandlers
 }
 
 // parseLevel converts a string level to a slog.Level.

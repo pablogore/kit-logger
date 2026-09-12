@@ -48,7 +48,9 @@ log := logger.New(logger.Config{
 
 `Writer` composes with the rest of `Config` (`GlobalFields`, `FilterRules`, `Sampling`, `BufferSize`, `Hook`, `ContextFields`) — it only changes where the pipeline's output lands.
 
-**`Config.Handler` bypasses the whole pipeline, not just `Writer`.** Supplying a `slog.Handler` of your own skips `Writer`, `FilterRules`, `GlobalFields`, the component handler, `Sampling`, the Prometheus handler, `BufferSize`, and `Hook` entirely — only `Level` and `RateLimit` (via the `SlogLogger` wrapper itself) still apply. Use `Config.Handler` when you want full control over the handler chain; use the other fields when you want the built-in pipeline.
+**`Config.Sink` replaces `Writer`, not the rest of the pipeline.** Supplying a `slog.Handler` of your own as `Config.Sink` still gets `FilterRules`, `GlobalFields`, the component handler, `Sampling`, the Prometheus handler, `BufferSize`, `Hook` and `SetLevel` applied on top of it, exactly like the built-in Text/JSON handler does. `Config.Handler` is a deprecated alias for `Sink` (`Sink` wins if both are set) — it used to bypass the whole pipeline, but no longer does.
+
+If you need the old total-bypass behavior — a hand-built chain that must not be redecorated — use `Config.PipelineOverride` instead. `Config.Validate()` (also reachable through `NewWithError`) reports an error naming every other field `PipelineOverride` causes to be ignored.
 
 ## Filtering
 
@@ -122,8 +124,8 @@ if managed, ok := log.(logger.ManagedLogger); ok {
 The lifecycle is captured when `New` assembles the pipeline, so it reaches the
 buffer regardless of how many decorators wrap it and regardless of whether the
 logger was derived through `With`. A chain assembled by hand and passed as
-`Config.Handler` is discovered through the `Unwrap` / `UnwrapAll` methods the
-built-in handlers implement.
+`Config.Sink` or `Config.PipelineOverride` is discovered through the `Unwrap` /
+`UnwrapAll` methods the built-in handlers implement.
 
 ## Globals and context fields
 

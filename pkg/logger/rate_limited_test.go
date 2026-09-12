@@ -71,6 +71,19 @@ func newCapturingHandler() *capturingHandler {
 	return &capturingHandler{sharedMu: &mu, sharedEntries: &[]capturedEntry{}}
 }
 
+// stripComponent drops a trailing "component" key/value pair from args.
+// Config.Handler is now decorated like any other sink, so every record also
+// carries the "component" group ComponentHandler adds -- tests that assert
+// their own args verbatim strip it first rather than hardcoding its value.
+func stripComponent(args []any) []any {
+	for i := 0; i+1 < len(args); i += 2 {
+		if args[i] == "component" {
+			return append(append([]any{}, args[:i]...), args[i+2:]...)
+		}
+	}
+	return args
+}
+
 func TestRateLimit_AllowsFirstEvent(t *testing.T) {
 	cap := newCapturingHandler()
 	log := New(Config{Handler: cap}).(*SlogLogger)
@@ -172,8 +185,8 @@ func TestNoOptions_BehaviorUnchanged(t *testing.T) {
 	assert.Equal(t, "a", entries[0].Message)
 	assert.Equal(t, "b", entries[1].Message)
 	assert.Equal(t, "c", entries[2].Message)
-	assert.Equal(t, []any{"k", "v"}, entries[1].Args)
-	assert.Equal(t, []any{"x", int64(1)}, entries[2].Args)
+	assert.Equal(t, []any{"k", "v"}, stripComponent(entries[1].Args))
+	assert.Equal(t, []any{"x", int64(1)}, stripComponent(entries[2].Args))
 }
 
 func TestThreadSafety_NoRace(t *testing.T) {
@@ -214,7 +227,7 @@ func TestNormalPath_WithoutRateLimit(t *testing.T) {
 	assert.Equal(t, slog.LevelInfo, got[0].Level)
 	assert.Equal(t, "world", got[1].Message)
 	assert.Equal(t, slog.LevelWarn, got[1].Level)
-	assert.Equal(t, []any{"key", "value"}, got[1].Args)
+	assert.Equal(t, []any{"key", "value"}, stripComponent(got[1].Args))
 }
 
 // TestExtractLogOptions_NormalFieldsNotLost verifies that normal key-value args are never dropped when options are present.
@@ -232,7 +245,7 @@ func TestExtractLogOptions_NormalFieldsNotLost(t *testing.T) {
 
 	entries := cap.getEntries()
 	require.Len(t, entries, 1)
-	args := entries[0].Args
+	args := stripComponent(entries[0].Args)
 	// Must contain exactly the normal fields a=1, b=2, d=3 (options stripped, order preserved).
 	assert.Equal(t, []any{"a", int64(1), "b", int64(2), "d", int64(3)}, args)
 }
@@ -246,7 +259,7 @@ func TestExtractLogOptions_OrderPreserved(t *testing.T) {
 
 	entries := cap.getEntries()
 	require.Len(t, entries, 1)
-	assert.Equal(t, []any{"first", int64(1), "second", int64(2), "third", int64(3)}, entries[0].Args)
+	assert.Equal(t, []any{"first", int64(1), "second", int64(2), "third", int64(3)}, stripComponent(entries[0].Args))
 }
 
 // TestExtractLogOptions_ChainedWithNoDuplication verifies that chained With() calls do not duplicate args.
@@ -260,7 +273,7 @@ func TestExtractLogOptions_ChainedWithNoDuplication(t *testing.T) {
 	entries := cap.getEntries()
 	require.Len(t, entries, 1)
 	// Underlying slog accumulates attrs from each With; we must see x=1, y=2 without duplication.
-	args := entries[0].Args
+	args := stripComponent(entries[0].Args)
 	assert.Len(t, args, 4, "expected exactly 4 args (x, 1, y, 2)")
 	assert.Equal(t, []any{"x", int64(1), "y", int64(2)}, args)
 }
