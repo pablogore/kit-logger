@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"errors"
 	"log/slog"
 	"testing"
@@ -67,6 +68,31 @@ func TestNewWithError_MetricsHandlerError_IsSurfacedButLoggerStaysUsable(t *test
 	assert.ErrorIs(t, err, boom)
 	require.NotNil(t, l)
 	l.Info("still logs") // must not panic
+}
+
+// TestNewWithError_MetricsHandlerNilNilResult_IsRejectedButLoggerStaysUsable
+// pins that a MetricsHandler breaking its own contract -- returning (nil,
+// nil) instead of either a valid handler or an error -- must not be silently
+// treated as "no instrumentation". decorate must surface a descriptive error
+// while still keeping the original pipeline usable, exactly as it does for
+// any other MetricsHandler failure.
+func TestNewWithError_MetricsHandlerNilNilResult_IsRejectedButLoggerStaysUsable(t *testing.T) {
+	var buf bytes.Buffer
+
+	l, err := NewWithError(Config{
+		Writer: &buf,
+		MetricsHandler: func(next slog.Handler) (slog.Handler, error) {
+			return nil, nil
+		},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MetricsHandler")
+	require.NotNil(t, l)
+
+	l.Info("still logs") // must not panic
+
+	assert.Contains(t, buf.String(), "still logs")
 }
 
 // TestConfig_Validate_PipelineOverrideIgnoresMetricsHandler extends the

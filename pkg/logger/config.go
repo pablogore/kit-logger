@@ -467,10 +467,11 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 // default Text/JSON base and a caller-supplied Sink -- which is what makes
 // Sink a terminal handler for the pipeline instead of a total override of it.
 //
-// A non-nil error means cfg.MetricsHandler itself failed (e.g. a Prometheus
-// registry collision): the returned handler is still fully usable, just
-// without instrumentation, since decorate must not fail the whole pipeline
-// over an optional seam.
+// A non-nil error means cfg.MetricsHandler itself failed -- either it
+// returned an error directly (e.g. a Prometheus registry collision), or it
+// broke its contract by returning a nil handler with a nil error. Either way
+// the returned handler is still fully usable, just without instrumentation,
+// since decorate must not fail the whole pipeline over an optional seam.
 func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher, error) {
 	var lifecycleHandlers []Flusher
 	var metricsErr error
@@ -502,9 +503,12 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher, error) {
 
 	if cfg.MetricsHandler != nil {
 		wrapped, err := cfg.MetricsHandler(h)
-		if err != nil {
+		switch {
+		case err != nil:
 			metricsErr = fmt.Errorf("Config: MetricsHandler: %w", err)
-		} else if wrapped != nil {
+		case wrapped == nil:
+			metricsErr = errors.New("Config: MetricsHandler returned nil handler without error")
+		default:
 			h = wrapped
 		}
 	}
