@@ -63,6 +63,19 @@ func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
 func (discardHandler) WithAttrs([]slog.Attr) slog.Handler        { return discardHandler{} }
 func (discardHandler) WithGroup(string) slog.Handler             { return discardHandler{} }
 
+// attrByKey finds the first attr with the given key. Config.Handler is now
+// decorated like any other sink, so a record also carries the "component"
+// group ComponentHandler adds -- tests that only care about their own attr
+// look it up by key instead of assuming a position or an exact count.
+func attrByKey(attrs []slog.Attr, key string) (slog.Attr, bool) {
+	for _, a := range attrs {
+		if a.Key == key {
+			return a, true
+		}
+	}
+	return slog.Attr{}, false
+}
+
 // TestGlobalLogger_ConcurrentAccess exercises every global entry point from
 // many goroutines at once. It is a race-detector test: it asserts almost
 // nothing by itself and is meaningless without -race, where it must be clean.
@@ -310,9 +323,9 @@ func TestWithContext_PerInstanceExtractorIgnoresTheGlobal(t *testing.T) {
 
 	log.WithContext(context.Background()).Info("hello")
 
-	require.Len(t, seen, 1)
-	assert.Equal(t, "tenant", seen[0].Key)
-	assert.Equal(t, "acme", seen[0].Value.String())
+	tenant, ok := attrByKey(seen, "tenant")
+	require.True(t, ok, "tenant attr not found in %v", seen)
+	assert.Equal(t, "acme", tenant.Value.String())
 }
 
 // A logger without its own extractor still honours the deprecated global, so
@@ -333,6 +346,7 @@ func TestWithContext_FallsBackToTheGlobalExtractor(t *testing.T) {
 
 	log.WithContext(context.Background()).Info("hello")
 
-	require.Len(t, seen, 1)
-	assert.Equal(t, "globex", seen[0].Value.String())
+	tenant, ok := attrByKey(seen, "tenant")
+	require.True(t, ok, "tenant attr not found in %v", seen)
+	assert.Equal(t, "globex", tenant.Value.String())
 }

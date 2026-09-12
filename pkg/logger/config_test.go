@@ -402,3 +402,204 @@ func TestConfig_Writer_StderrSubprocess(t *testing.T) {
 	assert.Empty(t, stdout.Bytes(), "stdout must be byte-empty when Config.Writer is os.Stderr")
 	assert.Contains(t, stderr.String(), "subprocess stderr message")
 }
+
+// argValue finds the value following the first occurrence of key in a flat
+// args slice, as capturedEntry.Args stores them.
+func argValue(args []any, key string) (any, bool) {
+	for i := 0; i+1 < len(args); i += 2 {
+		if args[i] == key {
+			return args[i+1], true
+		}
+	}
+	return nil, false
+}
+
+// TestConfig_Sink_IsDecoratedLikeTheDefaultHandler pins the core fix for
+// KITLOG-GO-011: a custom Sink is a terminal handler for the same pipeline
+// the default Text/JSON handler goes through, not a total bypass of it.
+func TestConfig_Sink_IsDecoratedLikeTheDefaultHandler(t *testing.T) {
+	t.Run("FilterRules drop matching records", func(t *testing.T) {
+		cap := newCapturingHandler()
+		logger := New(Config{
+			Sink:        cap,
+			FilterRules: []handler.FilterRule{{Key: "secret"}},
+		})
+		logger.Info("kept")
+		logger.Info("dropped", "secret", "x")
+
+		entries := cap.getEntries()
+		require.Len(t, entries, 1)
+		assert.Equal(t, "kept", entries[0].Message)
+	})
+
+	t.Run("GlobalFields are attached", func(t *testing.T) {
+		cap := newCapturingHandler()
+		logger := New(Config{Sink: cap, GlobalFields: map[string]string{"service": "svc"}})
+		logger.Info("hi")
+
+		entries := cap.getEntries()
+		require.Len(t, entries, 1)
+		v, ok := argValue(entries[0].Args, "service")
+		require.True(t, ok, "GlobalFields must be attached to a Sink-built logger")
+		assert.Equal(t, "svc", v)
+	})
+
+	t.Run("component attribution is added", func(t *testing.T) {
+		cap := newCapturingHandler()
+		logger := New(Config{Sink: cap})
+		logger.Info("hi")
+
+		entries := cap.getEntries()
+		require.Len(t, entries, 1)
+		_, ok := argValue(entries[0].Args, "component")
+		assert.True(t, ok, "Sink must receive component attribution like the default handler")
+	})
+
+	t.Run("Sampling is applied", func(t *testing.T) {
+		cap := newCapturingHandler()
+		logger := New(Config{
+			Sink: cap,
+			Sampling: SamplingConfig{
+				Enabled:     true,
+				Interval:    time.Hour,
+				Probability: 1,
+			},
+		})
+		logger.Info("first")
+		logger.Info("first")
+
+		require.Len(t, cap.getEntries(), 1, "the sampling interval must suppress the immediate repeat")
+	})
+
+	t.Run("Hook runs", func(t *testing.T) {
+		cap := newCapturingHandler()
+		called := false
+		logger := New(Config{
+			Sink: cap,
+			Hook: func(ctx context.Context, r slog.Record) (context.Context, bool) {
+				called = true
+				return ctx, true
+			},
+		})
+		logger.Info("hi")
+
+		assert.True(t, called, "Hook must run for a Sink-built logger")
+	})
+
+	t.Run("BufferSize buffers until Sync", func(t *testing.T) {
+		cap := newCapturingHandler()
+		logger := New(Config{Sink: cap, BufferSize: 10})
+		logger.Info("buffered")
+
+		assert.Empty(t, cap.getEntries(), "must not reach the sink before Sync")
+		require.NoError(t, logger.Sync())
+		assert.Len(t, cap.getEntries(), 1)
+	})
+}
+
+// TestConfig_Sink_SetLevelWorks is the exact no-op case from the issue: before
+// the fix, SetLevel had no effect on a logger built with a custom Handler
+// because the shared LevelVar was never wired into it.
+func TestConfig_Sink_SetLevelWorks(t *testing.T) {
+	cap := newCapturingHandler()
+	logger := New(Config{Sink: cap, Level: "error"})
+
+	logger.Info("suppressed before SetLevel")
+	require.Empty(t, cap.getEntries())
+
+	logger.SetLevel(slog.LevelDebug)
+	logger.Debug("now visible")
+
+	entries := cap.getEntries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "now visible", entries[0].Message)
+}
+
+// TestConfig_HandlerAndSink_BehaveIdentically pins Handler as a pure
+// deprecated alias for Sink.
+func TestConfig_HandlerAndSink_BehaveIdentically(t *testing.T) {
+	viaHandler := newCapturingHandler()
+	viaSink := newCapturingHandler()
+
+	New(Config{Handler: viaHandler, GlobalFields: map[string]string{"k": "v"}}).Info("msg")
+	New(Config{Sink: viaSink, GlobalFields: map[string]string{"k": "v"}}).Info("msg")
+
+	handlerEntries := viaHandler.getEntries()
+	sinkEntries := viaSink.getEntries()
+	require.Len(t, handlerEntries, 1)
+	require.Len(t, sinkEntries, 1)
+
+	hv, hok := argValue(handlerEntries[0].Args, "k")
+	sv, sok := argValue(sinkEntries[0].Args, "k")
+	require.True(t, hok)
+	require.True(t, sok)
+	assert.Equal(t, sv, hv)
+}
+
+func TestConfig_Validate_HandlerAndSinkBothSet(t *testing.T) {
+	cfg := Config{Handler: discardHandler{}, Sink: discardHandler{}}
+
+	err := cfg.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Handler")
+	assert.Contains(t, err.Error(), "Sink")
+}
+
+func TestConfig_Validate_PipelineOverrideNamesIgnoredFields(t *testing.T) {
+	cfg := Config{
+		PipelineOverride: discardHandler{},
+		GlobalFields:     map[string]string{"a": "b"},
+		BufferSize:       10,
+	}
+
+	err := cfg.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GlobalFields")
+	assert.Contains(t, err.Error(), "BufferSize")
+}
+
+func TestNewWithError_ReturnsValidateError(t *testing.T) {
+	logger, err := NewWithError(Config{Handler: discardHandler{}, Sink: discardHandler{}})
+
+	require.Error(t, err)
+	assert.NotNil(t, logger, "an invalid Config must still produce a usable logger")
+}
+
+// TestConfig_PipelineOverride_BypassesDecoration pins the escape hatch: unlike
+// Sink, PipelineOverride skips every decorator, exactly as Handler used to.
+func TestConfig_PipelineOverride_BypassesDecoration(t *testing.T) {
+	cap := newCapturingHandler()
+	logger := New(Config{
+		PipelineOverride: cap,
+		FilterRules:      []handler.FilterRule{{Key: "x"}},
+		GlobalFields:     map[string]string{"service": "svc"},
+	})
+	logger.Info("msg", "x", "should-not-be-filtered")
+
+	entries := cap.getEntries()
+	require.Len(t, entries, 1, "PipelineOverride must skip FilterRules entirely")
+	_, hasGlobal := argValue(entries[0].Args, "service")
+	assert.False(t, hasGlobal, "PipelineOverride must skip GlobalFields entirely")
+}
+
+// TestNew_DefaultConfigWritesNothingToStdout pins the LogInitialization gate:
+// a library constructor must not write to stdout as a side effect of being
+// called.
+func TestNew_DefaultConfigWritesNothingToStdout(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "logger_silent_default")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	oldStdout := os.Stdout
+	os.Stdout = tmpFile
+	defer func() { os.Stdout = oldStdout }()
+
+	_ = New(Config{})
+
+	content, err := os.ReadFile(tmpFile.Name())
+	require.NoError(t, err)
+	assert.Empty(t, content, "New must not write anything before the caller logs")
+}

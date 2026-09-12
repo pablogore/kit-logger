@@ -248,6 +248,22 @@ func TestSlogLogger_SetLevel_NilLevelVar(t *testing.T) {
 	})
 }
 
+// TestSlogLogger_SetLevel_CustomHandlerIsGated is the exact bug from
+// KITLOG-GO-011: SetLevel used to be a permanent no-op for a logger built
+// with a custom Handler, because the shared LevelVar was never wired into it.
+func TestSlogLogger_SetLevel_CustomHandlerIsGated(t *testing.T) {
+	cap := newCapturingHandler()
+	logger := New(Config{Handler: cap, Level: "info"})
+
+	logger.SetLevel(slog.LevelError)
+	logger.Info("must be suppressed now")
+	assert.Empty(t, cap.getEntries())
+
+	logger.SetLevel(slog.LevelDebug)
+	logger.Debug("must now get through")
+	assert.Len(t, cap.getEntries(), 1)
+}
+
 func TestSlogLogger_Sync(t *testing.T) {
 	logger := &SlogLogger{
 		logger:   slog.New(slog.NewTextHandler(os.Stdout, nil)),

@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pablogore/kit-logger/pkg/logger/handler"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,22 +93,23 @@ func componentGroupOf(record slog.Record) componentGroup {
 }
 
 // newFacade builds a Logger whose pipeline is ComponentHandler over a
-// controllable sink, optionally behind a BufferedHandler.
+// controllable sink, optionally behind a BufferedHandler. New builds both
+// unconditionally over Sink, so the test only needs to hand over the raw sink.
 func newFacade(t *testing.T, bufferSize int) (Logger, *gateHandler, func()) {
 	t.Helper()
 
 	sink := newGateHandler()
-	var h slog.Handler = handler.NewComponentHandler(sink)
+	log := New(Config{Level: "debug", Sink: sink, BufferSize: bufferSize})
 
 	flush := func() {}
 	if bufferSize > 0 {
-		buffered := handler.NewBufferedHandler(h, bufferSize)
-		t.Cleanup(func() { _ = buffered.Shutdown(context.Background()) })
-		flush = func() { require.NoError(t, buffered.Flush(context.Background())) }
-		h = buffered
+		flusher, ok := log.(Flusher)
+		require.True(t, ok)
+		t.Cleanup(func() { _ = flusher.Shutdown(context.Background()) })
+		flush = func() { require.NoError(t, flusher.Flush(context.Background())) }
 	}
 
-	return New(Config{Level: "debug", Handler: h}), sink, flush
+	return log, sink, flush
 }
 
 // thisFile is the base name of this test file, the expected attribution target
@@ -313,7 +312,7 @@ func attrStrings(record slog.Record) []string {
 func TestSlogLogger_DisabledLevelPaysNothing(t *testing.T) {
 	sink := newGateHandler()
 	counter := &countingHook{}
-	log := New(Config{Level: "debug", Handler: handler.NewComponentHandler(sink)}, WithCounterHook(counter))
+	log := New(Config{Level: "debug", Sink: sink}, WithCounterHook(counter))
 	slogLog, ok := log.(*SlogLogger)
 	require.True(t, ok)
 
@@ -394,7 +393,7 @@ func TestSlogLogger_DisabledLevelEmitsNothing(t *testing.T) {
 	for _, tc := range facadeCalls() {
 		t.Run(tc.name, func(t *testing.T) {
 			sink := newGateHandler()
-			log := New(Config{Level: "debug", Handler: handler.NewComponentHandler(sink)})
+			log := New(Config{Level: "debug", Sink: sink})
 			sink.enabled.Store(false)
 
 			tc.call(log)
@@ -409,7 +408,7 @@ func TestSlogLogger_DisabledLevelEmitsNothing(t *testing.T) {
 func TestSlogLogger_RateLimitSemanticsPreserved(t *testing.T) {
 	sink := newGateHandler()
 	counter := &countingHook{}
-	log := New(Config{Level: "debug", Handler: handler.NewComponentHandler(sink)}, WithCounterHook(counter))
+	log := New(Config{Level: "debug", Sink: sink}, WithCounterHook(counter))
 
 	for i := 0; i < 3; i++ {
 		log.Info("rate limited", WithRateLimit("key", time.Hour), WithCounter("metric"))
