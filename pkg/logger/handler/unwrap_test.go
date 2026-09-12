@@ -21,7 +21,6 @@ func TestUnwrap_ReturnsTheDecoratedHandler(t *testing.T) {
 	decorators := map[string]slog.Handler{
 		"hook":         handler.NewHookHandler(leaf, noopHook),
 		"buffered":     handler.NewBufferedHandler(leaf, 1),
-		"prometheus":   handler.NewPrometheusHandler(leaf),
 		"sampling":     handler.NewSamplingHandler(leaf, handler.SamplingConfig{}),
 		"component":    handler.NewComponentHandler(leaf),
 		"globalFields": handler.NewGlobalFieldsHandler(leaf, map[string]string{"k": "v"}, true),

@@ -6,7 +6,7 @@ An extensible structured logging framework for Go, built on top of `log/slog`, d
 
 - Full support for `log/slog`
 - Rule-based filtering that applies to record attrs, `With`/`WithAttrs`, and grouped attrs alike, in either drop-the-record or redact-the-field mode (see [Filtering](#filtering))
-- Built-in Prometheus metrics
+- Opt-in Prometheus metrics
 - Sampling and rate limiting
 - Context-aware and extensible with hooks
 - Opt-in OpenTelemetry trace correlation (`trace_id` / `span_id`)
@@ -48,9 +48,9 @@ log := logger.New(logger.Config{
 
 `Writer` composes with the rest of `Config` (`GlobalFields`, `FilterRules`, `Sampling`, `BufferSize`, `Hook`, `ContextFields`) — it only changes where the pipeline's output lands.
 
-**`Config.Sink` replaces `Writer`, not the rest of the pipeline.** Supplying a `slog.Handler` of your own as `Config.Sink` still gets `FilterRules`, `GlobalFields`, the component handler, `Sampling`, the Prometheus handler, `BufferSize`, `Hook` and `SetLevel` applied on top of it, exactly like the built-in Text/JSON handler does. `Config.Handler` is a deprecated alias for `Sink` (`Sink` wins if both are set) — it used to bypass the whole pipeline, but no longer does.
+**`Config.Sink` replaces `Writer`, not the rest of the pipeline.** Supplying a `slog.Handler` of your own as `Config.Sink` still gets `FilterRules`, `GlobalFields`, the component handler, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook` and `SetLevel` applied on top of it, exactly like the built-in Text/JSON handler does. `Config.Handler` is a deprecated alias for `Sink` (`Sink` wins if both are set) — it used to bypass the whole pipeline, but no longer does.
 
-If you need the old total-bypass behavior — a hand-built chain that must not be redecorated — use `Config.PipelineOverride` instead. It bypasses the handler-decoration pipeline only: `Sink`/`Handler`, `FilterRules`, `GlobalFields`, `Sampling`, `BufferSize`, `Hook`, `Writer`, `Format` and `Level` are all ignored, and `Config.Validate()` (also reachable through `NewWithError`) reports an error naming each one that was set. Logger-level behavior outside that chain is unaffected — `RateLimit`, `ContextFields` and the outer `ContextHandler` still apply.
+If you need the old total-bypass behavior — a hand-built chain that must not be redecorated — use `Config.PipelineOverride` instead. It bypasses the handler-decoration pipeline only: `Sink`/`Handler`, `FilterRules`, `GlobalFields`, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook`, `Writer`, `Format` and `Level` are all ignored, and `Config.Validate()` (also reachable through `NewWithError`) reports an error naming each one that was set. Logger-level behavior outside that chain is unaffected — `RateLimit`, `ContextFields` and the outer `ContextHandler` still apply.
 
 ## Filtering
 
@@ -256,10 +256,44 @@ The coverage system generates multiple report formats:
 
 ## Prometheus Metrics
 
-Automatically exposes:
+Metrics are opt-in. Importing `pkg/logger` (or `pkg/logger/handler`) never
+registers anything, anywhere -- a plain `logger.New(logger.Config{})` counts
+nothing and touches no registry. To wire instrumentation, import
+`pkg/logger/prometheus` (the only package in this module that depends on
+`client_golang`) and set `Config.MetricsHandler`:
+
+```go
+import (
+    "github.com/pablogore/kit-logger/pkg/logger"
+    kitprom "github.com/pablogore/kit-logger/pkg/logger/prometheus"
+    "github.com/prometheus/client_golang/prometheus"
+)
+
+log := logger.New(logger.Config{
+    MetricsHandler: func(next slog.Handler) (slog.Handler, error) {
+        return kitprom.New(next, prometheus.DefaultRegisterer, kitprom.Options{})
+    },
+})
 ```
-slog_logged_total{level="INFO"} 123
+
+This registers and exposes:
 ```
+kitlogger_records_total{level="INFO"} 123
+```
+
+`kitprom.New` takes the `prometheus.Registerer` explicitly -- pass your own
+registry instead of `prometheus.DefaultRegisterer` for a custom or per-tenant
+setup, or `nil` to count without registering anywhere. A registration
+collision with an existing, differently-typed collector returns a
+descriptive error instead of panicking; `kitprom.MustNew` panics on that
+error for callers that want to fail fast at startup.
+
+**Migrating from the old always-on metric:** `handler.NewPrometheusHandler`
+and the package-level `handler.LogCounter` it used to maintain are
+deprecated -- the former is now a no-op that returns its argument unchanged,
+and the latter is removed. Any dashboard built on `slog_logged_total` needs
+the consumer to opt in via `Config.MetricsHandler` as shown above; the new
+metric is named `kitlogger_records_total`, not `slog_logged_total`.
 
 ## HTTP & gRPC Integration
 
@@ -430,6 +464,8 @@ pkg/logger/
 │   └── middleware.go        # Middleware
 ├── otel/
 │   └── handler.go           # OpenTelemetry trace correlation
+├── prometheus/
+│   └── handler.go           # opt-in Prometheus instrumentation (Config.MetricsHandler)
 ├── utils/
 │   └── ...                  # shared helpers
 ├── kitlogtest/
@@ -439,7 +475,7 @@ pkg/logger/
     ├── filter_handler.go
     ├── global_fields_handler.go
     ├── component_handler.go
-    ├── prometheus_handler.go
+    ├── prometheus_handler.go   # deprecated no-op shim; see pkg/logger/prometheus
     └── ...
 ```
 
