@@ -268,6 +268,12 @@ takes any context-reading handler, not only this one.
 
 ## Tests
 
+Every Go snippet in this README is backed by a compiled `Example*` function —
+`pkg/logger/example_test.go` for the core `Config` sections, and an
+`example_test.go` in `grpc/`, `httpmw/`, `otel/` and `prometheus/` for theirs.
+`go vet ./...` and `make examples` fail the moment a snippet drifts from the
+real API, which is what keeps this file honest.
+
 The project enforces a **minimum 85% test coverage threshold**, checked by
 `./scripts/coverage-complete-report.sh`. Run `make coverage-threshold` (or
 `make ci-threshold` for the full CI pipeline) to see the current numbers —
@@ -339,6 +345,7 @@ import (
     kitgrpc "github.com/pablogore/kit-logger/pkg/logger/grpc"
     "github.com/pablogore/kit-logger/pkg/logger/httpmw"
     "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials/insecure"
 )
 
 grpcServer := grpc.NewServer(
@@ -384,6 +391,7 @@ grpcServer := grpc.NewServer(
 )
 
 conn, err := grpc.NewClient(target,
+    grpc.WithTransportCredentials(insecure.NewCredentials()),
     grpc.WithChainUnaryInterceptor(kitgrpc.UnaryClientInterceptor(opts)),
     grpc.WithChainStreamInterceptor(kitgrpc.StreamClientInterceptor(opts)),
 )
@@ -451,7 +459,9 @@ echoed on the response, and logged:
 ```go
 func handler(w http.ResponseWriter, r *http.Request) {
     id, ok := httpmw.RequestIDFrom(r.Context())
-    ...
+    if ok {
+        w.Header().Set("X-Handled-Request-Id", id)
+    }
 }
 ```
 
@@ -486,19 +496,69 @@ level follows the outcome (5xx → Error, 4xx → Warn, else Info — override w
 `Options.LevelFor`), a cancelled request carries `context_err`, and ID
 generation can no longer panic the request.
 
+## Known limitations
+
+Sharp edges that are true at HEAD, each with the issue that explains it. The
+list is meant to shrink; when one disappears, remove it here.
+
+- **Global fields override record attributes, not `With` attributes**
+  ([#12](https://github.com/pablogore/kit-logger/issues/12)). Attributes
+  attached through `logger.With(...)` are pre-formatted by the sink before the
+  global-fields handler runs, so a `With("env", ...)` that collides with a
+  global `env` reaches the output alongside it. Pass a colliding key at the
+  call site instead of through `With`.
+- **`Config.PipelineOverride` ignores most of `Config`**
+  ([#11](https://github.com/pablogore/kit-logger/issues/11)). It is the one
+  total bypass: `Sink`/`Handler`, `FilterRules`, `GlobalFields`, `Sampling`,
+  `MetricsHandler`, `BufferSize`, `Hook`, `Writer`, `Format` and `Level` are
+  ignored, and `Config.Validate()` names each one that was set. `RateLimit`,
+  `ContextFields` and `ContextHandler` still apply. `Config.Handler` used to
+  behave this way; it is now a deprecated alias for `Sink` and bypasses
+  nothing.
+- **`Sampling.Probability == 0` means unset and emits everything**
+  ([#4](https://github.com/pablogore/kit-logger/issues/4)). Zero is not "drop
+  everything"; set an explicit value below `1` to sample. A non-positive
+  `RateLimit` interval follows the same rule: it is tracked, counted by
+  `RateLimitInvalid` and reported once on stderr, but never limits
+  ([#5](https://github.com/pablogore/kit-logger/issues/5)).
+- **`Sync()` flushes without a deadline**
+  ([#3](https://github.com/pablogore/kit-logger/issues/3)). It is
+  `Flush(context.Background())`, kept for source compatibility and deprecated.
+  A stuck downstream handler can hold the caller; prefer `Flush(ctx)` or
+  `Shutdown(ctx)` with a timeout.
+- **Metrics are opt-in; importing the package registers nothing**
+  ([#10](https://github.com/pablogore/kit-logger/issues/10)). Without
+  `Config.MetricsHandler` no metric exists, and the old always-on
+  `slog_logged_total` is gone. See [Prometheus Metrics](#prometheus-metrics)
+  for the migration.
+- **`ComponentHandler` and `AddSource` both emit the call site**
+  ([#7](https://github.com/pablogore/kit-logger/issues/7)). The pipeline
+  always adds a `component` group derived from the record's PC. Leave
+  `slog.HandlerOptions.AddSource` off on a custom `Sink`, or the same call
+  site appears twice.
+- **`ManagedLogger` is reached by type assertion.** Every logger built by
+  `New` satisfies it; a consumer's own `Logger` implementation may not, in
+  which case `ExitWithFlush` falls back to `Sync()`.
+
 ## Package Structure
 
 ```
 pkg/logger/
-├── config.go
-├── interface.go
+├── config.go                # Config, New, NewWithError, the global accessor
+├── config_types.go          # typed Level / Format and the legacy string bridge
+├── interface.go             # Logger
+├── lifecycle.go             # ManagedLogger (Flush / Shutdown)
 ├── slog_logger.go
-├── rate.go
+├── level.go
+├── rate.go                  # WithRateLimit
+├── helpers.go
+├── loggerext.go             # ExitWithFlush
 ├── context_extracto.go
+├── example_test.go          # compiled twins of this README's snippets
 ├── grpc/
-│   └── interceptor.go       # UnaryLoggingInterceptor
+│   └── interceptor.go       # Unary/Stream server and client interceptors
 ├── httpmw/
-│   └── middleware.go        # Middleware
+│   └── middleware.go        # New, Middleware, RequestIDFrom
 ├── otel/
 │   └── handler.go           # OpenTelemetry trace correlation
 ├── prometheus/
@@ -508,12 +568,14 @@ pkg/logger/
 ├── kitlogtest/
 │   └── ...                  # MockLogger, TestHandler and other test doubles for consumers of this module
 └── handler/
-    ├── sampling_handler.go
-    ├── filter_handler.go
+    ├── buffered_handler.go     # async buffer with Flush / Shutdown
+    ├── component_handler.go    # call-site attribution from Record.PC
+    ├── filter_handler.go       # ModeDrop / ModeRedact
     ├── global_fields_handler.go
-    ├── component_handler.go
-    ├── prometheus_handler.go   # deprecated no-op shim; see pkg/logger/prometheus
-    └── ...
+    ├── hook_handler.go
+    ├── multi_handler.go
+    ├── sampling_handler.go
+    └── prometheus_handler.go   # deprecated no-op shim; see pkg/logger/prometheus
 ```
 
 ## Run Tests
