@@ -5,7 +5,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 
@@ -63,10 +62,10 @@ func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
 func (discardHandler) WithAttrs([]slog.Attr) slog.Handler        { return discardHandler{} }
 func (discardHandler) WithGroup(string) slog.Handler             { return discardHandler{} }
 
-// attrByKey finds the first attr with the given key. Config.Handler is now
-// decorated like any other sink, so a record also carries the "component"
-// group ComponentHandler adds -- tests that only care about their own attr
-// look it up by key instead of assuming a position or an exact count.
+// attrByKey finds the first attr with the given key. Config.Handler is
+// decorated like any other sink, so a record may carry attrs the pipeline
+// adds -- tests that only care about their own attr look it up by key
+// instead of assuming a position or an exact count.
 func attrByKey(attrs []slog.Attr, key string) (slog.Attr, bool) {
 	for _, a := range attrs {
 		if a.Key == key {
@@ -239,8 +238,8 @@ func TestGlobalLogger_LazyInitHappensExactlyOnce(t *testing.T) {
 		require.NotNil(t, l, "goroutine %d got no logger", i)
 		assert.Same(t, got[0], l, "goroutine %d got a different logger instance", i)
 	}
-	assert.Equal(t, 1, strings.Count(string(output), "Logger initialized"),
-		"a burst of first callers must construct exactly one logger")
+	assert.Empty(t, string(output),
+		"the lazy default must not write to stdout because a consumer touched a global")
 }
 
 func TestGlobalLogger_ReturnsTheExactInstanceLastSet(t *testing.T) {

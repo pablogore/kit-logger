@@ -87,6 +87,10 @@ type Format uint8
 const (
 	FormatText Format = iota // zero value: the safe default.
 	FormatJSON
+	// FormatConsole is a human-first layout for development: short local
+	// time, a colored level, the message, then key=value pairs. Not for
+	// production shippers, which want FormatJSON. See handler.ConsoleHandler.
+	FormatConsole
 )
 
 // String returns the canonical lowercase name ParseFormat accepts for f, or
@@ -98,6 +102,8 @@ func (f Format) String() string {
 		return "text"
 	case FormatJSON:
 		return "json"
+	case FormatConsole:
+		return "console"
 	default:
 		return fmt.Sprintf("format(%d)", uint8(f))
 	}
@@ -112,6 +118,8 @@ func ParseFormat(s string) (Format, error) {
 		return FormatText, nil
 	case "json":
 		return FormatJSON, nil
+	case "console":
+		return FormatConsole, nil
 	default:
 		return FormatText, fmt.Errorf("logger: invalid format %q", s)
 	}

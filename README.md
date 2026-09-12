@@ -11,7 +11,8 @@ An extensible structured logging framework for Go, built on top of `log/slog`, d
 - Context-aware and extensible with hooks
 - Opt-in OpenTelemetry trace correlation (`trace_id` / `span_id`)
 - Asynchronous buffering with safe shutdown
-- Support for global fields and component-based logging
+- One key per line: `With`, context fields and call-site attrs never duplicate a key, global fields are pinned first (see [Readable output](#readable-output))
+- Opt-in call-site attribution under `source`, and a human-first console format for development
 - Pluggable HTTP and gRPC interceptors, with a request-ID-propagating HTTP middleware
 
 ## Basic Usage
@@ -48,17 +49,68 @@ log := logger.New(logger.Config{
 
 `Writer` composes with the rest of `Config` (`GlobalFields`, `FilterRules`, `Sampling`, `BufferSize`, `Hook`, `ContextFields`) — it only changes where the pipeline's output lands.
 
-**`Config.Sink` replaces `Writer`, not the rest of the pipeline.** Supplying a `slog.Handler` of your own as `Config.Sink` still gets `FilterRules`, `GlobalFields`, the component handler, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook` and `SetLevel` applied on top of it, exactly like the built-in Text/JSON handler does. `Config.Handler` is a deprecated alias for `Sink` (`Sink` wins if both are set) — it used to bypass the whole pipeline, but no longer does.
+**`Config.Sink` replaces `Writer`, not the rest of the pipeline.** Supplying a `slog.Handler` of your own as `Config.Sink` still gets the dedup stage, `FilterRules`, `GlobalFields`, `AddSource`, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook` and `SetLevel` applied on top of it, exactly like the built-in Text/JSON handler does. Because the dedup stage materializes `With` attributes into the record, a `Sink` never receives `WithAttrs` or `WithGroup` calls: every attribute arrives on the record itself, nested with `slog.GroupValue` where a group was open. `Config.Handler` is a deprecated alias for `Sink` (`Sink` wins if both are set) — it used to bypass the whole pipeline, but no longer does.
 
 If you need the old total-bypass behavior — a hand-built chain that must not be redecorated — use `Config.PipelineOverride` instead. It bypasses the handler-decoration pipeline only: `Sink`/`Handler`, `FilterRules`, `GlobalFields`, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook`, `Writer`, `Format` and `Level` are all ignored, and `Config.Validate()` (also reachable through `NewWithError`) reports an error naming each one that was set. Logger-level behavior outside that chain is unaffected — `RateLimit`, `ContextFields` and the outer `ContextHandler` still apply.
 
+## Readable output
+
+A log line is read far more often than it is written, so the pipeline is
+shaped around what a reader scans for, following the conventions `log/slog`,
+OpenTelemetry and the usual log shippers agree on:
+
+```json
+{"time":"...","level":"INFO","msg":"order created","env":"prod","service":"orders","request_id":"req-123","order_id":"ord-1","took":"1.5s"}
+```
+
+- **Every key appears once per line.** `slog` deliberately writes duplicate
+  keys verbatim, and the ergonomic paths produce them: a logger derived with
+  `With("request_id", id)`, a `ContextFields` extractor that adds `request_id`
+  again, and a call site that logs it a third time. The innermost stage of the
+  pipeline (`handler.DedupHandler`) resolves them to one key with the value of
+  the last occurrence and the position of the first, so a JSON shipper never
+  has to guess which value wins. Groups with the same key merge member by
+  member.
+- **Global fields come first and are pinned.** `GlobalFields` describe the
+  process (`service`, `env`, `version`); they are emitted right after `msg`, in
+  sorted key order, and nothing — not `With`, not a context extractor, not the
+  call site — overrides them.
+- **`time`, `level` and `msg` belong to the handler.** A call-site attribute
+  with one of those keys is renamed to `attr.<key>` instead of shadowing the
+  built-in.
+- **Call-site attribution is opt-in and lives under `source`.** Set
+  `Config.AddSource` to get a `source` group (`function`, `file`, `line`) in the
+  same shape `slog.HandlerOptions.AddSource` uses. It is off by default: three
+  fields on every production line is noise. `component` is yours for naming a
+  subsystem; the pipeline never writes it.
+- **Durations are readable in every format.** A `time.Duration` renders as
+  `"1.5s"` in JSON as well as text, instead of a nanosecond integer. Values
+  whose key carries the unit (`duration_ms`) stay numeric.
+- **Messages are stable event names.** The HTTP middleware logs `http_request`
+  and the gRPC interceptors `grpc_call`; everything variable goes in fields.
+  Do the same in your own code: `log.Info("order created", "order_id", id)`,
+  not `log.Info("order " + id + " created")`.
+
+For development, `Format: logger.FormatConsole` writes one line per record with
+a short local time, a colored level, the message, then `key=value` pairs, with
+`source` rendered as `file.go:42` at the end:
+
+```
+15:04:05.123 INF order created service=orders request_id=req-123 order_id=ord-1
+15:04:05.124 ERR payment failed service=orders error="card declined" source=orders.go:87
+```
+
+Colors are on when the writer is a terminal and off for a pipe or a file;
+`handler.ConsoleOptions` has `NoColor` and `ForceColor` for the cases in
+between. Ship `FormatJSON` in production.
+
 ## Global fields
 
-`Config.GlobalFields` attaches a fixed set of fields to every record, in
-sorted key order, so two replicas built from the same config emit the same
-line shape. When a record already carries one of those keys, the global
-value **replaces** the record's attribute in place: the line never contains
-the same key twice, so a JSON shipper never has to guess which value wins.
+`Config.GlobalFields` attaches a fixed set of fields to every record, first
+after `msg` and in sorted key order, so two replicas built from the same config
+emit the same line shape. They are pinned: when `With`, a context extractor or
+the call site uses one of those keys, the global value wins and the line never
+contains the key twice.
 
 ```go
 log := logger.New(logger.Config{
@@ -67,13 +119,14 @@ log := logger.New(logger.Config{
 })
 
 log.Info("config reloaded", "env", "canary")
-// {"time":"...","level":"INFO","msg":"config reloaded","env":"prod","component":{...},"service":"checkout"}
+// {"time":"...","level":"INFO","msg":"config reloaded","env":"prod","service":"checkout"}
 ```
 
 Global fields always stay at the top level. Record attributes, and anything
 added with `WithAttrs` after a `WithGroup`, nest under the open groups exactly
-as they would with a bare `slog` handler. The same handler is available on its
-own for hand-built chains:
+as they would with a bare `slog` handler. For a hand-built chain,
+`handler.GlobalFieldsHandler` offers the same replacement rule as a standalone
+decorator:
 
 ```go
 h := handler.NewGlobalFieldsHandler(slog.NewJSONHandler(os.Stdout, nil),
@@ -83,11 +136,11 @@ slog.New(h).WithGroup("request").Info("handled", "method", "GET")
 // {"time":"...","level":"INFO","msg":"handled","env":"prod","request":{"method":"GET"}}
 ```
 
-One limit to know about: attributes attached with `logger.With(...)` before
-any `WithGroup` are handed to the sink to pre-format, as `slog` intends, so
-they are not visible to the replacement check. A `With("env", "canary")` on a
-logger whose global fields also set `env` is left as the sink formats it.
-Global fields override record attributes, not `With` attributes.
+The standalone handler has one limit the pipeline does not: attributes
+attached with `WithAttrs` before any `WithGroup` are handed to the sink to
+pre-format, as `slog` intends, so they are not visible to its replacement
+check. Inside `logger.New` the dedup stage sees everything, and global fields
+win over `With` attributes too.
 
 ## Filtering
 
@@ -213,8 +266,9 @@ carried the configured fields and `InfoContext(ctx, ...)` — the call everybody
 reaches for — silently carried none of them.
 
 Pick one style per call site: `WithContext` for a derived logger reused across
-several calls, the `*Context` methods for a single call. Doing both applies the
-extractor twice.
+several calls, the `*Context` methods for a single call. Doing both is
+harmless — the extractor runs twice, but the line still carries each key
+once (see [Readable output](#readable-output)).
 
 ## Trace correlation (OpenTelemetry)
 
@@ -501,12 +555,11 @@ generation can no longer panic the request.
 Sharp edges that are true at HEAD, each with the issue that explains it. The
 list is meant to shrink; when one disappears, remove it here.
 
-- **Global fields override record attributes, not `With` attributes**
-  ([#12](https://github.com/pablogore/kit-logger/issues/12)). Attributes
-  attached through `logger.With(...)` are pre-formatted by the sink before the
-  global-fields handler runs, so a `With("env", ...)` that collides with a
-  global `env` reaches the output alongside it. Pass a colliding key at the
-  call site instead of through `With`.
+- **A `Sink` never receives `WithAttrs` or `WithGroup`**
+  ([#42](https://github.com/pablogore/kit-logger/issues/42)). The dedup stage
+  holds them and materializes every attribute into the record, nested with
+  `slog.GroupValue` where a group was open, so a custom sink that relied on
+  pre-formatting `With` attributes sees them on the record instead.
 - **`Config.PipelineOverride` ignores most of `Config`**
   ([#11](https://github.com/pablogore/kit-logger/issues/11)). It is the one
   total bypass: `Sink`/`Handler`, `FilterRules`, `GlobalFields`, `Sampling`,
@@ -531,11 +584,11 @@ list is meant to shrink; when one disappears, remove it here.
   `Config.MetricsHandler` no metric exists, and the old always-on
   `slog_logged_total` is gone. See [Prometheus Metrics](#prometheus-metrics)
   for the migration.
-- **`ComponentHandler` and `AddSource` both emit the call site**
-  ([#7](https://github.com/pablogore/kit-logger/issues/7)). The pipeline
-  always adds a `component` group derived from the record's PC. Leave
-  `slog.HandlerOptions.AddSource` off on a custom `Sink`, or the same call
-  site appears twice.
+- **With `AddSource` on, a caller attribute named `source` is replaced**
+  ([#42](https://github.com/pablogore/kit-logger/issues/42)). `source` is the
+  key slog reserves for call-site attribution, and the pipeline's own group
+  wins under the usual last-value rule. Leave `slog.HandlerOptions.AddSource`
+  off on a custom `Sink` as well, or the same call site appears twice.
 - **`ManagedLogger` is reached by type assertion.** Every logger built by
   `New` satisfies it; a consumer's own `Logger` implementation may not, in
   which case `ExitWithFlush` falls back to `Sync()`.
@@ -575,6 +628,10 @@ pkg/logger/
     ├── hook_handler.go
     ├── multi_handler.go
     ├── sampling_handler.go
+    ├── dedup_handler.go        # innermost stage: one key per line, pinned global fields
+    ├── source_handler.go       # opt-in call-site attribution (Config.AddSource)
+    ├── console_handler.go      # FormatConsole, the development layout
+    ├── component_handler.go    # deprecated; use source_handler.go
     └── prometheus_handler.go   # deprecated no-op shim; see pkg/logger/prometheus
 ```
 

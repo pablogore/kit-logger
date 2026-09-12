@@ -6,10 +6,10 @@ Required skills for contributors. kit-logger is an I/O-performing logging librar
 
 ## 1. Handler Pipeline Composition
 
-- **Understand the full pipeline `New` assembles** — terminal sink (`Writer` + `Format`, or `Sink`) → `FilterRules` → `GlobalFields` → component handler → `Sampling` → `MetricsHandler` (only when set) → `BufferSize` → `Hook`, with `ContextHandler` wrapped outermost. Know what each stage does before changing the order or adding a new one.
+- **Understand the full pipeline `New` assembles** — terminal sink (`Writer` + `Format`, or `Sink`) → dedup stage (innermost, `GlobalFields` pinned first) → `FilterRules` → source handler (only with `AddSource`) → `Sampling` → `MetricsHandler` (only when set) → `BufferSize` → `Hook`, with `ContextHandler` wrapped outermost. Know what each stage does before changing the order or adding a new one; in particular the dedup stage must stay directly above the terminal handler, because slog's Text/JSON handlers pre-format `WithAttrs` and a pre-formatted attr cannot be deduplicated.
 - **Know the two contracts around a caller's handler** — `Sink` (and its deprecated alias `Handler`) is decorated by every stage above plus `SetLevel`; `PipelineOverride` is decorated by none of them and makes `Config.Validate()` name every field it ignored. When touching `New`, verify neither scope has drifted (a stage silently starting or stopping being applied is a real regression, not a refactor detail).
 - **Implement `Unwrap`/`UnwrapAll` on any new handler** — this is how `ManagedLogger` lifecycle discovery (`Flush`/`Shutdown`) reaches through a hand-assembled chain passed as `PipelineOverride`. A handler that doesn't implement it breaks lifecycle control for anyone who wraps it.
-- **Decorators that must see `With` attributes hold them, they do not forward them** — `FilterHandler` (rules) and `GlobalFieldsHandler` (after a `WithGroup`) record `WithAttrs`/`WithGroup` calls and replay or nest them at `Handle` time, because a forwarded attribute is pre-formatted by the sink and invisible afterwards. Reuse that pattern rather than inventing another.
+- **Decorators that must see `With` attributes hold them, they do not forward them** — `DedupHandler` (always), `FilterHandler` (rules) and `GlobalFieldsHandler` (after a `WithGroup`) record `WithAttrs`/`WithGroup` calls and replay or nest them at `Handle` time, because a forwarded attribute is pre-formatted by the sink and invisible afterwards. Reuse that pattern rather than inventing another.
 
 ---
 

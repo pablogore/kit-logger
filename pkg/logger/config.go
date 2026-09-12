@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +30,7 @@ var (
 	globalLogger atomic.Pointer[Logger]
 
 	// globalOnce guards the lazy default, so a burst of first callers
-	// constructs exactly one logger -- and emits exactly one startup line.
+	// constructs exactly one logger.
 	globalOnce sync.Once
 )
 
@@ -58,12 +59,19 @@ type Config struct {
 	// Deprecated: set Format directly; do not combine it with FormatString.
 	FormatString string
 
-	// GlobalFields are attached to every record, in sorted key order. A
-	// global field replaces a record attribute with the same key, so a
-	// record never reaches the sink carrying that key twice. Attributes
-	// attached through With/WithAttrs are delegated to the sink and are not
-	// inspected; see handler.GlobalFieldsHandler for the full semantics.
+	// GlobalFields describe the process (service, env, version) and are
+	// attached to every record, first, in sorted key order. They are pinned:
+	// an attr with the same key from With, from a context extractor or from
+	// the call site never overrides them, and the line never carries the key
+	// twice. See handler.DedupHandler for the full semantics.
 	GlobalFields map[string]string
+
+	// AddSource attaches a "source" group (function, file, line) naming the
+	// call site of every record, in the shape slog's own AddSource uses.
+	// Defaults to false: the attribution is three fields on every line, which
+	// is noise in production and belongs in a development or debugging
+	// configuration. See handler.SourceHandler.
+	AddSource bool
 
 	// Sink is the terminal handler that receives fully decorated records:
 	// FilterRules, GlobalFields, component attribution, Sampling,
@@ -230,7 +238,7 @@ func (cfg Config) Validate() error {
 	if _, err := resolveFormat("Format", cfg.Format, cfg.FormatString); err != nil {
 		errs = append(errs, err)
 	}
-	if cfg.Format > FormatJSON {
+	if cfg.Format > FormatConsole {
 		errs = append(errs, fmt.Errorf("Config: Format(%d) is not a valid Format value", cfg.Format))
 	}
 	if cfg.BufferSize < 0 {
@@ -364,7 +372,10 @@ func L() Logger {
 		return *p
 	}
 	globalOnce.Do(func() {
-		l := New(Config{LogInitialization: true})
+		// No startup line: a library must not write to stdout because a
+		// consumer touched a global. The lazy default is a fallback, not
+		// an event worth a log record.
+		l := New(Config{})
 		// CompareAndSwap rather than Store: a SetGlobal that landed while New
 		// was running expresses more recent intent and must not be clobbered
 		// by the lazy default.
@@ -427,11 +438,7 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 			if w == nil {
 				w = os.Stdout
 			}
-			if format == FormatJSON {
-				base = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: levelVar})
-			} else {
-				base = slog.NewTextHandler(w, &slog.HandlerOptions{Level: levelVar})
-			}
+			base = newTerminalHandler(w, format, levelVar)
 		}
 
 		var extra []Flusher
@@ -451,7 +458,10 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 
 	slogLogger := slog.New(h)
 	if cfg.LogInitialization {
-		slogLogger.Info("Logger initialized", "level", level.String(), "format", format.String())
+		// The values go under a "config" group: a bare "level" attr would
+		// collide with the level key every slog handler already writes.
+		slogLogger.Info("Logger initialized",
+			slog.Group("config", "level", level.String(), "format", format.String()))
 	}
 	optVal := &loggerOptions{}
 	for _, o := range opts {
@@ -468,10 +478,41 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 	return logger, errors.Join(cfg.Validate(), metricsErr)
 }
 
-// decorate wraps base in the Filter/GlobalFields/Component/Sampling/
-// MetricsHandler/Buffered/Hook chain, in that order. It is shared by the
-// default Text/JSON base and a caller-supplied Sink -- which is what makes
-// Sink a terminal handler for the pipeline instead of a total override of it.
+// newTerminalHandler builds the default sink for format over w.
+//
+// The JSON handler renders a time.Duration as a string ("1.5s") instead of
+// slog's default nanosecond integer, so JSON and text agree and a reader does
+// not have to count digits. Values that carry a unit in their key
+// (duration_ms) are plain integers and are left alone.
+func newTerminalHandler(w io.Writer, format Format, level slog.Leveler) slog.Handler {
+	switch format {
+	case FormatJSON:
+		return slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level, ReplaceAttr: durationAsString})
+	case FormatConsole:
+		return handler.NewConsoleHandler(w, handler.ConsoleOptions{Level: level})
+	default:
+		return slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
+	}
+}
+
+// durationAsString is the ReplaceAttr that makes the JSON handler print a
+// time.Duration the way the text handler already does.
+func durationAsString(_ []string, a slog.Attr) slog.Attr {
+	if a.Value.Kind() == slog.KindDuration {
+		a.Value = slog.StringValue(a.Value.Duration().String())
+	}
+	return a
+}
+
+// decorate wraps base in the Dedup/Filter/Source/Sampling/MetricsHandler/
+// Buffered/Hook chain, in that order. It is shared by the default base and a
+// caller-supplied Sink -- which is what makes Sink a terminal handler for the
+// pipeline instead of a total override of it.
+//
+// DedupHandler is innermost on purpose: it is the one stage that must see
+// every attr, from With, from the record and from the decorators above it,
+// after all of them have had their say. GlobalFields are its pinned attrs,
+// so they come first on the line and cannot be overridden.
 //
 // A non-nil error means cfg.MetricsHandler itself failed -- either it
 // returned an error directly (e.g. a Prometheus registry collision), or it
@@ -482,13 +523,14 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher, error) {
 	var lifecycleHandlers []Flusher
 	var metricsErr error
 
+	h = handler.NewDedupHandler(h, dedupOptions(cfg))
+
 	if len(cfg.FilterRules) > 0 {
 		h = handler.NewFilterHandlerWithMode(h, cfg.FilterRules, cfg.FilterMode)
 	}
-	if len(cfg.GlobalFields) > 0 {
-		h = handler.NewGlobalFieldsHandler(h, cfg.GlobalFields, true)
+	if cfg.AddSource {
+		h = handler.NewSourceHandler(h)
 	}
-	h = handler.NewComponentHandler(h)
 
 	if cfg.Sampling.Enabled {
 		// decorate performs no I/O of its own -- reporting an invalid
@@ -530,4 +572,26 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher, error) {
 	}
 
 	return h, lifecycleHandlers, metricsErr
+}
+
+// dedupOptions derives the DedupHandler configuration from cfg: GlobalFields
+// become the pinned attrs, in sorted key order so two replicas built from the
+// same config emit the same line shape.
+//
+// "source" is deliberately not reserved. SourceHandler sits above the dedup
+// stage and delivers its group as a record attr, so reserving the key would
+// rename the pipeline's own attribution. A caller attr named "source" is
+// simply overridden by the group when AddSource is on, under the usual
+// last-wins rule, and left alone otherwise.
+func dedupOptions(cfg Config) handler.DedupOptions {
+	keys := make([]string, 0, len(cfg.GlobalFields))
+	for k := range cfg.GlobalFields {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	pinned := make([]slog.Attr, 0, len(keys))
+	for _, k := range keys {
+		pinned = append(pinned, slog.String(k, cfg.GlobalFields[k]))
+	}
+	return handler.DedupOptions{Pinned: pinned}
 }

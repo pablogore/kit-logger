@@ -21,10 +21,11 @@ import (
 // calls Handle from its worker goroutine), to how deep ComponentHandler sits
 // in a decorator chain, and to the layout of the calling package.
 //
-// Relationship with slog.HandlerOptions.AddSource: AddSource makes the
-// terminal handler emit a standard "source" attr derived from the same PC, so
-// it is a differently shaped duplicate of the "component" group. Keep
-// AddSource off when using ComponentHandler.
+// Deprecated: use SourceHandler, which emits the same information under
+// "source", the key slog reserves for call-site attribution, and leaves
+// "component" free for the subsystem name most services log under it. The
+// default pipeline no longer uses ComponentHandler; it is kept for chains
+// assembled by hand.
 type ComponentHandler struct {
 	next slog.Handler
 }

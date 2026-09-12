@@ -7,10 +7,11 @@
 ## 1. I/O and the Handler Pipeline
 
 - **I/O belongs in this library.** Writing to `Config.Writer`, exposing Prometheus metrics, and talking to gRPC/HTTP middleware are the library's job, not a boundary it delegates elsewhere.
-- **`Config.Sink` is a terminal handler that the whole pipeline decorates.** `FilterRules`, `GlobalFields`, the component handler, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook` and `SetLevel` apply on top of a caller-supplied `Sink` exactly as on the built-in handler. `Config.Handler` is a deprecated alias with identical behavior.
+- **`Config.Sink` is a terminal handler that the whole pipeline decorates.** The dedup stage, `FilterRules`, `GlobalFields`, `AddSource` attribution, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook` and `SetLevel` apply on top of a caller-supplied `Sink` exactly as on the built-in handler; the `Sink` receives every attribute on the record and never a `WithAttrs`/`WithGroup` call. `Config.Handler` is a deprecated alias with identical behavior.
 - **`Config.PipelineOverride` is the only escape hatch, and it bypasses the decoration pipeline entirely.** Setting it ignores `Sink`/`Handler`, `FilterRules`, `GlobalFields`, `Sampling`, `MetricsHandler`, `BufferSize`, `Hook`, `Writer`, `Format` and `Level`, and `Config.Validate()` reports each ignored field by name. `RateLimit`, `ContextFields` and `ContextHandler` still apply. Any change to `New` must preserve this all-or-nothing behavior — don't let it drift into applying some built-in stages but not others.
 - **Filtering has two modes; name the one you mean.** `FilterHandler` matches record attrs, `With`/`WithAttrs` attrs and grouped attrs. `ModeDrop` discards the whole record; `ModeRedact` replaces only the matching value. Do not document "redaction" for a drop-mode rule or vice versa.
-- **Global fields never emit a key twice.** A global field replaces a colliding record attribute in place or yields to it, in sorted key order, at the top level even under `WithGroup`. `With`-supplied attributes are outside its reach by design (see AGENTS.md, Known deviations).
+- **Every key is emitted once per line.** `DedupHandler` is the innermost stage and stays directly above the terminal handler; it resolves `With`, context and call-site attributes to one key (last value, first position), pins `GlobalFields` first in sorted order where nothing overrides them, and reserves `time`/`level`/`msg`. Do not add a decorator below it.
+- **Call-site attribution is opt-in and named `source`.** `SourceHandler` runs only with `Config.AddSource`; `component` belongs to the caller. `ComponentHandler` is deprecated and not part of the pipeline.
 
 ---
 

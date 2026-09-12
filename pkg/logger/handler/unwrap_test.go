@@ -23,6 +23,8 @@ func TestUnwrap_ReturnsTheDecoratedHandler(t *testing.T) {
 		"buffered":     handler.NewBufferedHandler(leaf, 1),
 		"sampling":     handler.NewSamplingHandler(leaf, handler.SamplingConfig{}),
 		"component":    handler.NewComponentHandler(leaf),
+		"source":       handler.NewSourceHandler(leaf),
+		"dedup":        handler.NewDedupHandler(leaf, handler.DedupOptions{}),
 		"globalFields": handler.NewGlobalFieldsHandler(leaf, map[string]string{"k": "v"}, true),
 		"filter":       handler.NewFilterHandler(leaf, []handler.FilterRule{{Key: "k"}}),
 	}
