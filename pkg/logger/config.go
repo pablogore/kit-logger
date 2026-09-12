@@ -60,10 +60,10 @@ type Config struct {
 	GlobalFields map[string]string
 
 	// Sink is the terminal handler that receives fully decorated records:
-	// FilterRules, GlobalFields, component attribution, Sampling, Prometheus,
-	// BufferSize and Hook are all applied on top of it, in the same order as
-	// the default Text/JSON handler. When nil, that default handler (over
-	// Writer, chosen by Format) is used instead.
+	// FilterRules, GlobalFields, component attribution, Sampling,
+	// MetricsHandler, BufferSize and Hook are all applied on top of it, in
+	// the same order as the default Text/JSON handler. When nil, that
+	// default handler (over Writer, chosen by Format) is used instead.
 	//
 	// SetLevel works uniformly here too: Sink is wrapped in an internal
 	// handler gated on the same LevelVar the default path uses, so a custom
@@ -73,25 +73,43 @@ type Config struct {
 	// Handler is a deprecated alias for Sink; Sink wins if both are set.
 	//
 	// Deprecated: use Sink. Handler used to bypass the entire pipeline --
-	// FilterRules, GlobalFields, component attribution, Sampling, Prometheus,
-	// BufferSize, Hook and SetLevel were all silently ignored when it was set.
+	// FilterRules, GlobalFields, component attribution, Sampling,
+	// MetricsHandler, BufferSize, Hook and SetLevel were all silently ignored
+	// when it was set.
 	// It now behaves exactly like Sink. Use PipelineOverride for the old
 	// bypass behavior.
 	Handler slog.Handler
 
 	// PipelineOverride replaces the handler-decoration pipeline verbatim,
 	// exactly as Handler used to: Sink/Handler, FilterRules, GlobalFields,
-	// Sampling, BufferSize, Hook, Writer, Format and Level are all ignored,
-	// and Validate reports each one that was set as an error naming it. This
-	// is the escape hatch for a caller that must not have its chain
-	// decorated, e.g. one that already assembled its own Filter/Sampling/
-	// Buffer stack.
+	// Sampling, MetricsHandler, BufferSize, Hook, Writer, Format and Level
+	// are all ignored, and Validate reports each one that was set as an
+	// error naming it. This is the escape hatch for a caller that must not
+	// have its chain decorated, e.g. one that already assembled its own
+	// Filter/Sampling/Buffer stack.
 	//
 	// Logger-level behavior that lives outside that chain is unaffected:
 	// RateLimit, ContextFields and the outer ContextHandler still apply.
 	PipelineOverride slog.Handler
 
 	Hook func(ctx context.Context, r slog.Record) (context.Context, bool)
+
+	// MetricsHandler wraps the pipeline with instrumentation when non-nil.
+	// Default: no instrumentation -- New inserts nothing, and no record
+	// touches any metrics collector.
+	//
+	// Use pkg/logger/prometheus.New to build one:
+	//
+	//	cfg.MetricsHandler = func(next slog.Handler) (slog.Handler, error) {
+	//	    return kitprom.New(next, prometheus.DefaultRegisterer, kitprom.Options{})
+	//	}
+	//
+	// This is a function seam rather than a typed field or a bool flag so
+	// that pkg/logger never imports a metrics package: the consumer imports
+	// pkg/logger/prometheus, this package does not. An error returned here
+	// is joined into NewWithError's result; New (which discards errors)
+	// leaves the pipeline unwrapped rather than fail the whole construction.
+	MetricsHandler func(next slog.Handler) (slog.Handler, error)
 
 	// Keys no longer has any effect.
 	//
@@ -182,6 +200,9 @@ func (cfg Config) Validate() error {
 		}
 		if cfg.Hook != nil {
 			ignored = append(ignored, "Hook")
+		}
+		if cfg.MetricsHandler != nil {
+			ignored = append(ignored, "MetricsHandler")
 		}
 		if cfg.Writer != nil {
 			ignored = append(ignored, "Writer")
@@ -374,6 +395,7 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 	// derived one, not the root that owns the buffer.
 	var lifecycleHandlers []Flusher
 	var h slog.Handler
+	var metricsErr error
 
 	switch {
 	case cfg.PipelineOverride != nil:
@@ -407,7 +429,7 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 		}
 
 		var extra []Flusher
-		h, extra = decorate(base, cfg)
+		h, extra, metricsErr = decorate(base, cfg)
 		lifecycleHandlers = append(lifecycleHandlers, extra...)
 	}
 
@@ -437,15 +459,21 @@ func NewWithError(cfg Config, opts ...Option) (Logger, error) {
 		lifecycle:     newLifecycleGroup(lifecycleHandlers...),
 		contextFields: cfg.ContextFields,
 	}
-	return logger, cfg.Validate()
+	return logger, errors.Join(cfg.Validate(), metricsErr)
 }
 
 // decorate wraps base in the Filter/GlobalFields/Component/Sampling/
-// Prometheus/Buffered/Hook chain, in that order. It is shared by the default
-// Text/JSON base and a caller-supplied Sink -- which is what makes Sink a
-// terminal handler for the pipeline instead of a total override of it.
-func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher) {
+// MetricsHandler/Buffered/Hook chain, in that order. It is shared by the
+// default Text/JSON base and a caller-supplied Sink -- which is what makes
+// Sink a terminal handler for the pipeline instead of a total override of it.
+//
+// A non-nil error means cfg.MetricsHandler itself failed (e.g. a Prometheus
+// registry collision): the returned handler is still fully usable, just
+// without instrumentation, since decorate must not fail the whole pipeline
+// over an optional seam.
+func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher, error) {
 	var lifecycleHandlers []Flusher
+	var metricsErr error
 
 	if len(cfg.FilterRules) > 0 {
 		h = handler.NewFilterHandlerWithMode(h, cfg.FilterRules, cfg.FilterMode)
@@ -472,7 +500,14 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher) {
 		})
 	}
 
-	h = handler.NewPrometheusHandler(h)
+	if cfg.MetricsHandler != nil {
+		wrapped, err := cfg.MetricsHandler(h)
+		if err != nil {
+			metricsErr = fmt.Errorf("Config: MetricsHandler: %w", err)
+		} else if wrapped != nil {
+			h = wrapped
+		}
+	}
 
 	if cfg.BufferSize > 0 {
 		buffered := handler.NewBufferedHandler(h, cfg.BufferSize)
@@ -484,5 +519,5 @@ func decorate(h slog.Handler, cfg Config) (slog.Handler, []Flusher) {
 		h = handler.NewHookHandler(h, cfg.Hook)
 	}
 
-	return h, lifecycleHandlers
+	return h, lifecycleHandlers, metricsErr
 }

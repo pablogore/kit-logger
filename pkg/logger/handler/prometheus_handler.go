@@ -1,64 +1,20 @@
 package handler
 
-import (
-	"context"
-	"log/slog"
-	"sync"
+import "log/slog"
 
-	"github.com/prometheus/client_golang/prometheus"
-)
-
-// LogCounter is a Prometheus counter vector to count the total number of slog log entries.
-var LogCounter = prometheus.NewCounterVec(
-	prometheus.CounterOpts{
-		Name: "slog_logged_total",
-		Help: "Total number of slog log entries.",
-	},
-	[]string{"level"},
-)
-
-var registerOnce sync.Once
-
-func init() {
-	registerOnce.Do(func() {
-		// Use Register instead of MustRegister to avoid panics
-		if err := prometheus.Register(LogCounter); err != nil {
-			// If the metric is already registered, that's fine
-			if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
-				// Use the existing metric
-				LogCounter = are.ExistingCollector.(*prometheus.CounterVec)
-			}
-		}
-	})
-}
-
-// PrometheusHandler is a log handler that increments a Prometheus counter for each log entry.
-type PrometheusHandler struct {
-	next slog.Handler
-}
-
+// NewPrometheusHandler is deprecated: Prometheus instrumentation moved to
+// pkg/logger/prometheus, so this package no longer needs client_golang as a
+// dependency. This function is now a no-op: it registers nothing, counts
+// nothing, and returns next unchanged.
+//
+// Deprecated: use pkg/logger/prometheus.New, wired through
+// Config.MetricsHandler, instead:
+//
+//	cfg.MetricsHandler = func(next slog.Handler) (slog.Handler, error) {
+//	    return kitprom.New(next, prometheus.DefaultRegisterer, kitprom.Options{})
+//	}
+//
+// This function will be removed in a future release.
 func NewPrometheusHandler(next slog.Handler) slog.Handler {
-	return &PrometheusHandler{next: next}
+	return next
 }
-
-func (h *PrometheusHandler) Handle(ctx context.Context, r slog.Record) error {
-	LogCounter.WithLabelValues(r.Level.String()).Inc()
-	return h.next.Handle(ctx, r)
-}
-
-func (h *PrometheusHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	return h.next.Enabled(ctx, level)
-}
-
-func (h *PrometheusHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &PrometheusHandler{next: h.next.WithAttrs(attrs)}
-}
-
-func (h *PrometheusHandler) WithGroup(name string) slog.Handler {
-	return &PrometheusHandler{next: h.next.WithGroup(name)}
-}
-
-// Unwrap returns the handler this one decorates. It lets a logger lifecycle
-// (Flush, Shutdown) traverse a chain that was assembled by hand, instead of
-// stopping at the outermost handler.
-func (h *PrometheusHandler) Unwrap() slog.Handler { return h.next }
