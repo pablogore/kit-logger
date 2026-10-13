@@ -9,6 +9,7 @@ package httpmw
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,7 +18,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/getsyntegrity/kit-core/idgen"
+	"github.com/oklog/ulid/v2"
 
 	kitlog "github.com/pablogore/kit-logger/pkg/logger"
 )
@@ -221,16 +222,20 @@ func defaultLevelFor(status int) slog.Level {
 	}
 }
 
-// newULID is the default ID generator. idgen panics when its entropy reader
-// fails, so the panic is converted into an error here: an ID-generation failure
-// must cost a log field, not a request.
-func newULID() (id string, err error) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			id, err = "", fmt.Errorf("httpmw: id generation panicked: %v", rec)
-		}
-	}()
-	return idgen.NewULID(), nil
+// newULID is the default ID generator. An entropy failure is returned as an
+// error rather than a panic: an ID-generation failure must cost a log field,
+// not a request.
+func newULID() (string, error) {
+	return newULIDFrom(rand.Reader)
+}
+
+// newULIDFrom generates a ULID from the given entropy source.
+func newULIDFrom(entropy io.Reader) (string, error) {
+	id, err := ulid.New(ulid.Timestamp(time.Now()), entropy)
+	if err != nil {
+		return "", fmt.Errorf("httpmw: id generation failed: %w", err)
+	}
+	return id.String(), nil
 }
 
 // resolveRequestID reuses a usable inbound ID and otherwise generates one.
@@ -252,8 +257,8 @@ func resolveRequestID(inbound string, gen func() (string, error)) string {
 	return id
 }
 
-// safeGen contains a panicking custom generator the same way newULID contains
-// the default one.
+// safeGen contains a panicking custom generator, so a misbehaving IDGen cannot
+// drop a request.
 func safeGen(gen func() (string, error)) (id string, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {

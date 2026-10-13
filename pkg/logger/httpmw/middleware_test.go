@@ -360,9 +360,8 @@ func TestNew_IDGenFailureDoesNotPanicAndStillServes(t *testing.T) {
 func TestNew_IDGenPanicIsContained(t *testing.T) {
 	log := kitlogtest.NewMockLogger()
 
-	// The default generator is idgen.NewULID, which panics if its entropy
-	// reader fails. A logging middleware must not turn that into a dropped
-	// request.
+	// A custom generator may panic. A logging middleware must not turn that
+	// into a dropped request.
 	h := handlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	mw := httpmw.New(httpmw.Options{
