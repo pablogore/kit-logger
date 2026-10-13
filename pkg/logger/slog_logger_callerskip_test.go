@@ -82,7 +82,7 @@ func TestSlogLogger_WithCallerSkipAttributesThroughAnAdapter(t *testing.T) {
 
 				records := sink.drain()
 				require.Len(t, records, 1)
-				got := componentGroupOf(records[0])
+				got := sourceGroupOf(records[0])
 				require.True(t, got.found, "component group not found")
 				assert.Equal(t, thisFile, got.file, "facadeCalls live in the neighbouring test file")
 				assert.Equal(t, expectedLine, got.line, "record must name the adapter's caller, not the adapter")
@@ -103,7 +103,7 @@ func TestSlogLogger_WithCallerSkipComposes(t *testing.T) {
 
 	records := sink.drain()
 	require.Len(t, records, 1)
-	got := componentGroupOf(records[0])
+	got := sourceGroupOf(records[0])
 	require.True(t, got.found)
 	assert.Equal(t, callerSkipTestFile, got.file)
 	assert.Equal(t, line+1, got.line)
@@ -121,7 +121,7 @@ func TestSlogLogger_WithCallerSkipSurvivesWithAndWithContext(t *testing.T) {
 
 	records := sink.drain()
 	require.Len(t, records, 1)
-	got := componentGroupOf(records[0])
+	got := sourceGroupOf(records[0])
 	require.True(t, got.found)
 	assert.Equal(t, line+1, got.line)
 }
@@ -154,5 +154,5 @@ func TestSlogLogger_WithCallerSkipBeyondTheStackAddsNoGroup(t *testing.T) {
 
 	records := sink.drain()
 	require.Len(t, records, 1)
-	assert.False(t, componentGroupOf(records[0]).found)
+	assert.False(t, sourceGroupOf(records[0]).found)
 }
